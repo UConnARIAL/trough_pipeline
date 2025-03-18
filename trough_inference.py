@@ -166,8 +166,65 @@ def main():
     dist.barrier()
     dist.destroy_process_group()
 
+import argparse
+import os
+
+def parse_arguments():
+    """Parses command-line arguments for model and folder paths."""
+    parser = argparse.ArgumentParser(description="Inference script with configurable paths.")
+
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default="/scratch1/projects/PDG_shared/Troughs_Segformer/model_epoch_13.pth",
+        help="Path to the model checkpoint file.",
+    )
+    parser.add_argument(
+        "--input_folder",
+        type=str,
+        default="/scratch1/projects/PDG_shared/Troughs_Segformer/AL_sample/",
+        help="Path to the input folder containing TIFF files.",
+    )
+    parser.add_argument(
+        "--output_folder",
+        type=str,
+        default="/scratch1/projects/PDG_shared/Troughs_Segformer/AL_sample_out/",
+        help="Path to the output folder to save prediction results.",
+    )
+
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    main()
+    args = parse_arguments()
+
+    MODEL_PATH = args.model_path
+    INPUT_FOLDER = args.input_folder
+    OUTPUT_FOLDER = args.output_folder
+
+    print(f"Model Path: {MODEL_PATH}")
+    print(f"Input Folder: {INPUT_FOLDER}")
+    print(f"Output Folder: {OUTPUT_FOLDER}")
+
+    # Now you can use MODEL_PATH, INPUT_FOLDER, and OUTPUT_FOLDER
+    # in the rest of your script. For example:
+
+    # Check if input folder exists
+    if not os.path.isdir(INPUT_FOLDER):
+        print(f"Error: Input folder '{INPUT_FOLDER}' does not exist.")
+        exit(1)
+
+    # Create output folder if it doesn't exist
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    print(f"Output will be saved in: {OUTPUT_FOLDER}")
+
+
+
+
+
+
+
+
+
 
 #conda activate /scratch1/projects/PDG_shared/Troughs_Segformer/segformer-env
 #python -m torch.distributed.launch --nproc_per_node=1 --nnodes=1 --node_rank=0 --master_addr="129.114.44.118" --master_port=12355 inference.py
