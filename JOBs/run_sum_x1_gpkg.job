@@ -1,0 +1,64 @@
+#!/bin/bash
+
+#SBATCH -J ag101
+#SBATCH -p rtx
+#SBATCH -N 1  # 10 nodes
+#SBATCH -n 1 # 1 task per node (one Python proc)
+#SBATCH --cpus-per-task=3
+#SBATCH -t 8:00:00
+#SBATCH -o ag1x_%j.out
+#SBATCH -e sg1x_%j.err
+#SBATCH -A TG-NAIRR240088
+
+set -euo pipefail
+
+# --------- User-configurable paths/args ----------
+CONDA_SH="$HOME/.bashrc"
+CONDA_ENV="/scratch2/projects/PDG_shared/CONDA_ENV/segformer-env-gpkg3/"
+PY_SCRIPT="gt_gpkg_tile_resume_check_sub35.py"
+
+MASTER_DIR="../masked"
+OUT_TILES_DIR="/scratch2/projects/PDG_shared/TCN_gpkgs"
+MOSAIC_GPKG="/scratch2/projects/PDG_shared/TCN_gpkgs/all_mosaic.gpkg"
+IMAGERY_DIR="/scratch2/projects/PDG_shared/AlaskaTundraMosaic/imagery"
+
+WORKERS=1                             # 3 workers per node, as requested
+RANK_ST="${1:-1}"                     # starting rank (positional arg, default 1)
+# -----------------------------------------------
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1              # avoid CPU over-subscription per worker
+
+# Get the concrete hostnames of the allocated nodes
+NODES=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+NODE_LIST=($NODES)
+NUM_NODES=${#NODE_LIST[@]}
+
+echo "Allocated nodes (${NUM_NODES}):"
+printf '  %s\n' "${NODE_LIST[@]}"
+echo "Starting rank: ${RANK_ST}"
+
+# Launch one task per node, each with a unique rank
+for i in "${!NODE_LIST[@]}"; do
+  NODE="${NODE_LIST[$i]}"
+  RANK=$(( RANK_ST + i ))
+
+  echo "Launching on ${NODE}: rank=${RANK} workers=${WORKERS}"
+
+  srun --exclusive -N 1 -n 1 -c "${SLURM_CPUS_PER_TASK}" -w "${NODE}" \
+    bash -lc "
+        source '${CONDA_SH}' &&
+        conda activate '${CONDA_ENV}' &&
+        python gt_gpkg_tile_sum.py \
+            --master_dir ../../masked \
+            --output_tiles_dir /scratch2/projects/PDG_shared/TCN_gpkgs \
+            --mosaic_gpkg /scratch2/projects/PDG_shared/TCN_gpkgs/all_mosaic.gpkg \
+            --imagery_dir /scratch2/projects/PDG_shared/AlaskaTundraMosaic/imagery \
+            --tifs_per_run 1 \
+            --tile_rank_st ${RANK} \
+            --tile_rank_end ${RANK} \
+            --workers 1
+    " &
+done
+wait
+echo "All node tasks completed."
