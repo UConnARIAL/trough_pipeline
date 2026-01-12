@@ -1,8 +1,18 @@
 Provide you have a list of trough masks
 1. CHECK for water
-python ocean_filter_make_new_masks.py   --water-shp ./water_mask/water_clip.gpkg --tifs "./redo_masks/*/*.tif"   --ocean-threshold 0.99  --buffer-m 500 --out-masks-dir ./redo_w_masked --out-csv ocean_filter.csv   --out-drop drop_tiles.txt --out-boundary boundary_tiles.txt
-
+bash -lc '
+python ocean_filter_make_new_masks.py  \
+       --water-shp ./water_mask/water_clip.gpkg \
+       --tifs "./redo_masks/*/*.tif"   \
+       --ocean-threshold 0.99  \
+       --buffer-m 500 \
+       --out-masks-dir ./redo_w_masked \
+       --out-csv ocean_filter.csv  \
+       --out-drop drop_tiles.txt \
+       --out-boundary boundary_tiles.txt
+'
 2. Generate graph data via the redo_list of cleaned masks, will also check for existing gpkgs to see if they are complete beofre starting
+bash -lc '
 python gt_gpkg_tile_check_n_resume_sub.py \
        --master_dir ./redo_masks/ \
        --output_tiles_dir /scratch2/projects/PDG_shared/TCN_gpkgs_redo \
@@ -12,7 +22,9 @@ python gt_gpkg_tile_check_n_resume_sub.py \
        --tifs_per_run 10 \
        --tile_rank_st 1 \
        --tile_rank_end 1 \
-       --workers 40
+       --workers 1
+'
+
 3. Generate the tile level summaries for all the given tiles. as the at the graph data creation sumary was differed.
         python gt_gpkg_sub_tile_sum.py \
             --master_dir ../../masked \

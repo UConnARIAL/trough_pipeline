@@ -10,6 +10,9 @@ from pathlib import Path
 import re
 
 import logging
+##############################
+##RMOVE HARD CODING need to add cutline cration to pipeline and remove this part.
+###############
 def tiff_to_gpkg_path(tif_path, old_gpkg_root="/scratch2/projects/PDG_shared/AlaskaTundraMosaicTroughGeoPkg",
                       ensure_parent=False, postfix="_trough_layers.gpkg"):
     """

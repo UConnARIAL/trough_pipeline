@@ -6,7 +6,7 @@ PY=python
 SCRIPT="ocean_filter_make_new_masks.py"
 
 WATER_SHP="../water_mask/water_3413_clip.gpkg"
-MASKED_ROOT="/scratch2/projects/PDG_shared/AlaskaTundraMosaicMasks/"            # where 43_19, 44_19, ... live
+MASKED_ROOT="/scratch2/projects/PDG_shared/AlaskaTundraMosaicMasks/"  # where 43_19, 44_19, ... live
 OUT_ROOT="./ocean_masked"   # we will create OUT_ROOT/<tile_id>/
 THRESHOLD="0.99"
 BUFFER_M="500"
