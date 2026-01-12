@@ -17,20 +17,12 @@ os.environ["OMP_NUM_THREADS"] = "1"
 
 import sys
 import gc
-import glob
-import time
-import sqlite3
 import argparse
-import logging
 import multiprocessing as mp
 from contextlib import contextmanager
 from math import sin, cos, radians, atan2, degrees
 
-import numpy as np
-import pandas as pd
-import geopandas as gpd
 import shapely.geometry as sgeom
-from shapely.ops import unary_union
 
 import rasterio
 from rasterio.transform import xy as rio_xy
@@ -182,7 +174,6 @@ CREATE TABLE IF NOT EXISTS gpkg_metadata_reference (
     conn.commit()
     return md_id
 
-import sqlite3
 
 def list_gpkg_layers_sqlite(path):
     """
@@ -271,8 +262,6 @@ def get_sub_tile_id(tif_path: str) -> str:
 
 #---------- resume gpkg code helpers -------------------------------
 # --- put near your other utilities ---
-import os, re
-from pathlib import Path
 from typing import Sequence, Tuple, List
 
 def _expected_gpkg_name_for_tif(tif_path: str, gpkg_suffix: str = "_TCN.gpkg") -> str:
@@ -282,7 +271,8 @@ def _expected_gpkg_name_for_tif(tif_path: str, gpkg_suffix: str = "_TCN.gpkg") -
     return f"{stem}{gpkg_suffix}"
 
 #---------------- Sanity check for gpkg created by pipe line to decide to redo
-import os, sqlite3, logging
+import sqlite3
+
 
 def _has_table(con: sqlite3.Connection, table: str) -> bool:
     row = con.execute(
@@ -389,11 +379,9 @@ def _records_to_gdf(records, crs_wkt):
         return None
     return gpd.GeoDataFrame(records, geometry="geometry", crs=crs_wkt or None)
 
-import add_from_gpkg_layers as AL
-import add_from_mask_rastors as AdMsk
+
+from lib import add_from_mask_rastors as AdMsk, add_from_gpkg_layers as AL
 import update_in_exp_cover as UpExpCov
-from pathlib import Path
-import re
 
 EXTRA_GPKG_LAYERS = ["input_image_cutlines"]
 NEW_LAYER_NAMES = ["InputMosaicCutlinesVector"]
@@ -493,8 +481,6 @@ def _write_per_file_gpkg(tile_dir, tif_path, crs_wkt,
 
 #----- NEW write per file to resume from previous work -------------------
 
-from pathlib import Path
-import os, re, logging
 from osgeo import ogr
 
 def _gpkg_delete_layer(gpkg_path: str, layer_name: str) -> None:
@@ -1565,7 +1551,6 @@ def sanity_check_paths(master_dir, imagery_dir):
 #-------------CODE ADDED for sub_tile aggregations------------------------------------------------------
 # Add at top of module:
 import re
-from shapely.geometry import box
 from shapely.ops import unary_union
 
 def _subtile_id_from_basename(gpkg_path: str) -> str:

@@ -19,9 +19,7 @@ import sys
 import gc
 import glob
 import time
-import sqlite3
 import argparse
-import logging
 import multiprocessing as mp
 from contextlib import contextmanager
 from math import sin, cos, radians, atan2, degrees
@@ -32,7 +30,6 @@ import geopandas as gpd
 import shapely.geometry as sgeom
 from shapely.ops import unary_union
 
-import rasterio
 from rasterio.transform import xy as rio_xy
 from skimage.morphology import skeletonize
 from skan.csr import pixel_graph
@@ -216,8 +213,6 @@ def get_sub_tile_id(tif_path: str) -> str:
 
 #---------- resume gpkg code helpers -------------------------------
 # --- put near your other utilities ---
-import os, re
-from pathlib import Path
 from typing import Sequence, Tuple, List
 
 def _expected_gpkg_name_for_tif(tif_path: str, gpkg_suffix: str = "_TCN.gpkg") -> str:
@@ -227,7 +222,8 @@ def _expected_gpkg_name_for_tif(tif_path: str, gpkg_suffix: str = "_TCN.gpkg") -
     return f"{stem}{gpkg_suffix}"
 
 #---------------- Sanity check for gpkg created by pipe line to decide to redo
-import os, sqlite3, logging
+import sqlite3
+
 
 def _has_table(con: sqlite3.Connection, table: str) -> bool:
     row = con.execute(
@@ -334,11 +330,9 @@ def _records_to_gdf(records, crs_wkt):
         return None
     return gpd.GeoDataFrame(records, geometry="geometry", crs=crs_wkt or None)
 
-import add_from_gpkg_layers as AL
-import add_from_mask_rastors as AdMsk
+
+from lib import add_from_mask_rastors as AdMsk, add_from_gpkg_layers as AL
 import update_in_exp_cover as UpExpCov
-from pathlib import Path
-import re
 
 EXTRA_GPKG_LAYERS = ["input_image_cutlines"]
 NEW_LAYER_NAMES = ["InputMosaicCutlinesVector"]
