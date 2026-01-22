@@ -97,17 +97,33 @@ def pix_to_xy(transform, rr, cc):
     xs, ys = rio_xy(transform, rr, cc, offset="center")
     return np.asarray(xs), np.asarray(ys)
 
+from contextlib import contextmanager
 
+@contextmanager
 def sqlite_fast_writes(conn):
     """Speed up writes without changing content."""
     cur = conn.cursor()
+
+    # Save current settings
+    old_sync = conn.execute("PRAGMA synchronous;").fetchone()[0]
+    old_cache = conn.execute("PRAGMA cache_size;").fetchone()[0]
+    old_jmode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+
+    # Apply faster settings
     cur.execute("PRAGMA journal_mode=MEMORY;")
     cur.execute("PRAGMA synchronous=OFF;")
     cur.execute("PRAGMA cache_size=-200000;")  # ~200MB page cache
     try:
         yield
     finally:
-        cur.execute("PRAGMA synchronous=FULL;")
+        # Restore (best effort)
+        try: cur.execute(f"PRAGMA journal_mode={old_jmode};")
+        except Exception: pass
+        try: cur.execute(f"PRAGMA synchronous={old_sync};")
+        except Exception: pass
+        try: cur.execute(f"PRAGMA cache_size={old_cache};")
+        except Exception: pass
+        cur.close()
 
 def write_table(conn, table_name, df, pk_name=None):
     """Create/replace table; optionally set INTEGER PRIMARY KEY 'pk_name'."""
