@@ -17,9 +17,10 @@ Requires: numpy, rasterio, shapely, pyproj, GDAL (for OGR path).
 
 Usage
 -----
+bash -lc '
 python ocean_filter_make_new_masks.py \
   --water-shp /path/arctic_water.shp \
-  --tifs "/data/masks/**/*.tif" \
+  --tifs "./data/masks/**/*.tif" \
   --ocean-threshold 0.99 \
   --buffer-m 500 \
   --out-masks-dir /data/new_masks \
@@ -27,7 +28,7 @@ python ocean_filter_make_new_masks.py \
   --out-drop drop_tiles.txt \
   --out-boundary boundary_tiles.txt \
   --max-workers 5
-
+'
 # OR if you pre-convert to GeoJSON:
 python ocean_filter_make_new_masks_nofiona.py \
   --water-geojson /path/arctic_water_3338.json \

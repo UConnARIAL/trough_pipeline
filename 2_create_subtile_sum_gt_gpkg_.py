@@ -78,11 +78,6 @@ def _listlayers_safe(path):
         return set()
 
 
-
-
-
-
-
 #---------- resume gpkg code helpers -------------------------------
 # --- put near your other utilities ---
 from typing import Sequence, Tuple, List
@@ -104,7 +99,7 @@ import sqlite3
 
 
 from lib import add_from_mask_rastors as AdMsk, add_from_gpkg_layers as AL
-import update_in_exp_cover as UpExpCov
+from lib import update_in_exp_cover as UpExpCov
 
 EXTRA_GPKG_LAYERS = ["input_image_cutlines"]
 NEW_LAYER_NAMES = ["InputMosaicCutlinesVector"]
@@ -908,6 +903,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
 """
+USAGE
 python gt_gpkg_sub_tile_sum.py \
             --master_dir ../../masked \
             --output_tiles_dir /scratch2/projects/PDG_shared/TCN_gpkgs \
@@ -917,4 +913,15 @@ python gt_gpkg_sub_tile_sum.py \
             --tile_rank_st 101 \
             --tile_rank_end 101 \
             --workers 1
+
+python 2_create_subtile_sum_gt_gpkg_.py \
+            --master_dir ../TCN_refac_test_imgs \
+            --output_tiles_dir ../TCN_refac_test_gpkgs \
+            --mosaic_gpkg ../TCN_refac_test_gpkgs/all_mosaic.gpkg \
+            --imagery_dir /scratch2/projects/PDG_shared/AlaskaTundraMosaic/imagery \
+            --tifs_per_run 20 \
+            --tile_rank_st 1 \
+            --tile_rank_end 2 \
+            --workers 1
+
 """

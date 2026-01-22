@@ -1,15 +1,29 @@
 #!/usr/bin/env python3
 """
 Common utilities shared by:
-  1.create_resume_subtile_gt_gpkg.py
-  2.create_subtile_sum_gt_gpkg.py
-  3.create_global_sum_gt_gpkg.py
+  1_create_resume_subtile_gt_gpkg.py
+  2_create_subtile_sum_gt_gpkg.py
+  3_create_global_sum_gt_gpkg.py
 
-Extracted to remove duplicated code while keeping stage-specific logic in each script.
+Refactored to remove duplicated code while keeping stage-specific logic in each script.
+
+Overall objective:
+Builds per-tile GeoPackages (components/edges/nodes + per-tile global_stats + XML)
+and a master GeoPackage (global_stats rows for all tiles, global_poly polygons + XML per tile),
+plus a whole-mosaic aggregation table global_stats_summary (1 row) with properly weighted averages.
+
+Decisions:
+  • Orientation: keep ONLY step-weighted mean on [0,180) (drop edge-weighted).
+  • global_poly attributes: store averages instead of raw counts for nodes/edges:
+      - avg_graph_nodes_per_component = num_graph_nodes / num_components
+      - avg_graph_edges_per_component = num_graph_edges / num_components
+
+Project: Permafrost Discovery Gateway: Mapping and Analysing Trough Capilary Networks
+PI      : Chandi Witharana
+Authors : Michael Pimenta, Amal Perera
 """
 
 from __future__ import annotations
-
 import contextlib
 import logging
 import os
@@ -26,7 +40,7 @@ import geopandas as gpd
 import shapely.geometry as sgeom
 from shapely.ops import unary_union
 
-
+import glob
 
 class StageTimer:
     """Tiny context manager for stage timing that logs on exit if enabled."""
@@ -48,8 +62,6 @@ class StageTimer:
             else:
                 logging.debug(f"{self.prefix} {self.stage} ✗ {dt:.2f}s ({exc})")
 
-
-
 def logp(verbose: bool, level: int, msg: str):
     logging.log(level, msg) if verbose else None
 
@@ -64,8 +76,6 @@ def axial_mean_deg(deg_list):
     if s == 0.0 and c == 0.0:
         return -1.0
     return (0.5 * np.degrees(np.arctan2(s, c))) % 180.0
-
-
 
 def combine_axial_deg(weight_angle_pairs):
     """Combine axial angles given (w, theta_deg) pairs. Returns -1.0 if invalid/empty."""
@@ -83,12 +93,9 @@ def combine_axial_deg(weight_angle_pairs):
         return -1.0
     return (0.5 * degrees(atan2(S, C))) % 180.0
 
-
-
 def pix_to_xy(transform, rr, cc):
     xs, ys = rio_xy(transform, rr, cc, offset="center")
     return np.asarray(xs), np.asarray(ys)
-
 
 
 def sqlite_fast_writes(conn):
@@ -101,8 +108,6 @@ def sqlite_fast_writes(conn):
         yield
     finally:
         cur.execute("PRAGMA synchronous=FULL;")
-
-
 
 def write_table(conn, table_name, df, pk_name=None):
     """Create/replace table; optionally set INTEGER PRIMARY KEY 'pk_name'."""
@@ -168,8 +173,6 @@ CREATE TABLE IF NOT EXISTS gpkg_metadata_reference (
     conn.commit()
     return md_id
 
-
-
 def list_gpkg_layers_sqlite(path):
     """
     Return a list of layer (table) names from a GeoPackage at `path`
@@ -215,13 +218,9 @@ def list_gpkg_layers_sqlite(path):
     except sqlite3.Error:
         return []
 
-
-
 def has_layer_sqlite(path, layer_name):
     """Case-sensitive check; adjust to lower()==lower() if you want CI."""
     return layer_name in list_gpkg_layers_sqlite(path)
-
-
 
 def is_valid_geopackage(path: str) -> bool:
     """Return True if file looks like a real GeoPackage (has gpkg_contents & gpkg_spatial_ref_sys)."""
@@ -236,8 +235,6 @@ def is_valid_geopackage(path: str) -> bool:
     except Exception:
         return False
 
-
-
 def _is_valid_gpkg(path: str) -> bool:
     """Optional sanity check: can OGR open it and see ≥1 layer?"""
     try:
@@ -249,7 +246,6 @@ def _is_valid_gpkg(path: str) -> bool:
         return ok
     except Exception:
         return False
-
 
 
 def _has_table(con: sqlite3.Connection, table: str) -> bool:
@@ -663,3 +659,146 @@ def build_master_gpkg(mosaic_gpkg_path, per_tile_rows, imagery_dir):
                 if poly_rowid is not None:
                     links.append({"reference_scope": "row", "table_name": "global_poly", "row_id_value": poly_rowid})
                 insert_xml_metadata(conn, xml, links=links)
+
+import sqlite3
+from osgeo import ogr, gdal, osr
+
+def check_gpkg_crs_all_layers(gpkg_path: str, target_srs: str) -> list[str]:
+    """
+    Validate that all vector layers and raster tables in a GeoPackage match target_srs.
+    Returns a list of human-readable problems (empty list => PASS).
+    """
+    problems: list[str] = []
+
+    # Prepare target SRS
+    t = osr.SpatialReference()
+    t.SetFromUserInput(target_srs)
+
+    # ---- Vector layers (OGR) ----
+    ds = ogr.Open(gpkg_path, update=0)
+    if ds is None:
+        return [f"Cannot open GPKG with OGR: {gpkg_path}"]
+    try:
+        for i in range(ds.GetLayerCount()):
+            lyr = ds.GetLayer(i)
+            if lyr is None:
+                continue
+            name = lyr.GetName()
+            srs = lyr.GetSpatialRef()
+            if srs is None:
+                problems.append(f"VECTOR CRS MISSING: layer='{name}'")
+                continue
+            if srs.IsSame(t) != 1:
+                problems.append(f"VECTOR CRS MISMATCH: layer='{name}' expected={target_srs}")
+    finally:
+        ds = None
+
+    # ---- Raster tables (SQLite + GDAL) ----
+    try:
+        with sqlite3.connect(gpkg_path) as con:
+            rows = con.execute(
+                "SELECT table_name FROM gpkg_contents WHERE data_type='tiles'"
+            ).fetchall()
+            raster_tables = [r[0] for r in rows]
+    except Exception as e:
+        problems.append(f"Cannot query gpkg_contents for rasters: {e}")
+        raster_tables = []
+
+    for rt in raster_tables:
+        rds = gdal.Open(f"GPKG:{gpkg_path}:{rt}", gdal.GA_ReadOnly)
+        if rds is None:
+            problems.append(f"RASTER OPEN FAIL: table='{rt}'")
+            continue
+        wkt = rds.GetProjection() or ""
+        rds = None
+
+        s = osr.SpatialReference()
+        if not wkt:
+            problems.append(f"RASTER CRS MISSING: table='{rt}'")
+            continue
+        try:
+            s.ImportFromWkt(wkt)
+        except Exception:
+            problems.append(f"RASTER CRS PARSE FAIL: table='{rt}'")
+            continue
+
+        if s.IsSame(t) != 1:
+            problems.append(f"RASTER CRS MISMATCH: table='{rt}' expected={target_srs}")
+
+    return problems
+
+from pathlib import Path
+from typing import Optional
+
+from pathlib import Path
+from typing import Optional, Sequence
+
+def build_tile_structured_path(
+    subtile_path: str | Path,
+    root: str | Path,
+    *,
+    tile_id: Optional[str] = None,
+    postfix: Optional[str] = None,
+    ext: Optional[str] = None,
+    strip_postfixes: Sequence[str] = ("_mask.tif",),  # default: clean current mask postfix
+    preserve_rel_under_tile: bool = False,
+) -> str:
+    """
+    Build a path under `root` mirroring the tile/subtile structure of `subtile_path`.
+
+    Enhancements:
+      - `strip_postfixes` removes any known postfixes from the source filename
+        BEFORE appending the desired `postfix`. This prevents duplicated suffixes
+        like *_mask_mask.tif.
+
+    Args:
+        subtile_path: Existing subtile path (used as the "key").
+        root: Destination root directory.
+        tile_id: If provided, use it; else infer from subtile_path.parent.name.
+        postfix: Desired postfix to append (e.g., "_mask.tif", "_TCN.gpkg").
+        ext: Optional forced extension if postfix is not provided (".tif", ".gpkg", ".json").
+        strip_postfixes: Postfixes to remove from the end of the filename before appending `postfix`.
+                         Defaults to ("_mask.tif",).
+        preserve_rel_under_tile: If True, preserve any subfolders under <tile_id>.
+    """
+    p = Path(subtile_path)
+    r = Path(root)
+
+    tid = tile_id or p.parent.name
+
+    # optional relative subdir preservation
+    rel_dir = Path()
+    if preserve_rel_under_tile:
+        parts = p.parts
+        if tid in parts:
+            idx = len(parts) - 1 - list(reversed(parts)).index(tid)
+            rel_dir = Path(*parts[idx + 1 : -1])
+
+    # ---- derive a "clean base" name from the source filename ----
+    name = p.name
+
+    # strip any known postfixes (longest first avoids partial stripping issues)
+    for sp in sorted(strip_postfixes or (), key=len, reverse=True):
+        if sp and name.endswith(sp):
+            name = name[: -len(sp)]
+            break
+
+    # If we stripped something like "_mask.tif", `name` now ends with the stem portion.
+    # Ensure `name` has no trailing dot leftovers (defensive).
+    if name.endswith("."):
+        name = name[:-1]
+
+    # If `name` still has an extension (e.g., ".tif"), remove it so postfix/ext logic is consistent.
+    base = Path(name).stem if Path(name).suffix else name
+
+    # ---- apply requested postfix/ext ----
+    if postfix:
+        out_name = f"{base}{postfix}"
+    elif ext:
+        ext2 = ext if ext.startswith(".") else f".{ext}"
+        out_name = f"{base}{ext2}"
+    else:
+        out_name = p.name  # unchanged
+
+    return str(r / tid / rel_dir / out_name)
+

@@ -46,8 +46,6 @@ def tiff_to_gpkg_path(tif_path, old_gpkg_root="/scratch2/projects/PDG_shared/Ala
         gpkg_path.parent.mkdir(parents=True, exist_ok=True)
     return gpkg_path
 
-
-
 def _run(args: list[str]) -> None:
     try:
         subprocess.check_call(args)

@@ -1,0 +1,86 @@
+# ===================== Shared / Global =====================
+[project]
+name = "AK_TCN"
+version = "2026.01"
+id_version = "v1.0-deterministic-rcsorted-neighsorted-compsorted"
+
+[crs]
+target_epsg = 3338
+default_pixel_m = 0.5
+
+[runtime]
+# Used as defaults; each step can override under [steps.<name>.runtime]
+workers = 0                # 0 = auto
+hard_max_workers = 32
+max_gb_per_worker = 64
+openblas_threads = 1
+omp_threads = 1
+
+[io]
+# These are common across steps
+model_mask_dir = "../TCN_refac_test_imgs/"             # dir that contains ML model outputs (detections)
+master_dir = "../TCN_refac_test_imgs/"                 # step1 reads from here clean masks from detected masks
+output_root = "../TCN_refac_test_gpkgs"                # all step outputs rooted here
+
+# Convenience subfolders (steps can override if needed)
+output_tiles_dir = "../TCN_refac_test_gpkgs"   # step1 writes per-file gpkg under tile_id/
+tile_out_dir    = "./outputs/tiles"      # step2 could write per-tile gpkg
+global_out_dir  = "./outputs/global"     # step3 could write global gpkg / reports
+
+[layers]
+nodes      = "GraphTheoraticNodes"
+edges      = "GraphTheoraticEdges"
+components = "GraphTheoraticComponents"
+cutlines   = "InputMosaicCutlinesVector"
+
+[cutlines]
+enabled = true
+root = "/scratch2/projects/PDG_shared/AlaskaTundraMosaic/imagery"
+filename_pattern = "ArcticMosaic_{tile_id}_cutlines.shp"
+
+[masks]
+# original mask store used by step1 packaging
+old_gpkg_root = "/scratch2/projects/PDG_shared/AK_TCN_Masks_only/" #not required
+postfix = "_mask.tif"
+
+[vectorize]
+target_srs = "EPSG:3338"
+assume_src_srs = "EPSG:3413"
+build_overviews = [2, 4, 8, 16]
+eight_connected = true
+min_area = 0.5
+simplify_tol = 0.25
+
+[exposure]
+enabled = true
+cutline_layer = "InputMosaicCutlinesVector"
+date_field = "ACQDATE"
+mean_month = 7
+mean_day = 15
+sigma_days = 45
+edges_length_field = "length_m"
+comps_length_field = "total_length_m"
+target_crs = "EPSG:3338"
+
+# ===================== Step 1: Subtile processing =====================
+[steps.subtile]
+enabled = true
+tifs_per_run = 35
+comps_heartbeat = 20000
+
+# Optional filters for debugging/CI-like runs (step can override via CLI too)
+[steps.subtile.select]
+one_tile = ""         # empty means disabled
+one_tif = false
+limit_tifs = 0        # 0 means unlimited
+
+# ===================== Step 2: Tile aggregation (future) =====================
+[steps.tile]
+enabled = false
+# input will likely be [io.subtile_out_dir], output [io.tile_out_dir]
+# add any tile-specific thresholds/fields later
+
+# ===================== Step 3: Global summary (future) =====================
+[steps.global]
+enabled = false
+# output might be [io.global_out_dir]
