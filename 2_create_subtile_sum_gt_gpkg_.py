@@ -274,284 +274,314 @@ def _subtile_id_from_basename(gpkg_path: str) -> str:
 
     # --- helpers (near your other helpers) ---
 
+import os
+import re
+import glob
+import time
+import sqlite3
+import logging
 from pathlib import Path
+from typing import Optional, Dict, Any, Iterable, List
 
-def _subtile_id_from_basename(gpkg_path: str) -> str:
-    stem = Path(gpkg_path).stem
-    # strip trailing _TCN or _TCN_* suffix
-    return re.sub(r'(?i)_TCN(?:_.*)?$', '', stem)
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import box as shapely_box
 
-def _make_tilename(sub_tile_id: str) -> list[str]:
-    """Return possible TILENAME keys (case/extension tolerant)."""
-    base = f"{sub_tile_id}"
-    return [f"{base}.tif", f"{base}.TIF", base]  # some tilesets omit extension in attrs
+# -----------------------------
+# small helpers
+# -----------------------------
 
 def _norm_key(s: str) -> str:
-    return s.strip().lower()
+    return str(s).strip().lower()
 
-# --- worker now receives imagery_dir too ---
-def _agg_worker(task):
-    """task = (tile_id, in_dir, out_dir, imagery_dir, smart_verbose)"""
-    tile_id, tile_dir, output_tiles_dir, imagery_dir, smart_verbose = task
-    return aggregate_tile_from_perfile_gpkgs(
-        tile_id, tile_dir, output_tiles_dir, imagery_dir, verbose=smart_verbose
-    )
+def _subtile_id_from_basename(gpkg_path: str) -> str:
+    # "ArcticMosaic_58_16_1_1_TCN.gpkg" -> "ArcticMosaic_58_16_1_1"
+    stem = Path(gpkg_path).stem
+    return re.sub(r"(?i)_tcn(?:_.*)?$", "", stem)
 
-def _ensure_crs(gdf, target_crs, label=""):
-    # Nothing to do if no target CRS or empty
-    if target_crs is None or gdf.empty:
+def _make_tilename_keys(sub_tile_id: str) -> List[str]:
+    # tiles.shp might store "X.tif" or "X" etc.
+    return [f"{sub_tile_id}.tif", f"{sub_tile_id}.TIF", sub_tile_id]
+
+def _remove_sqlite_sidecars(path: str) -> None:
+    for suf in ("", "-wal", "-shm"):
+        p = path + suf
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError as e:
+                logging.warning("Could not remove %s: %s", p, e)
+
+def _to_target_crs(gdf: gpd.GeoDataFrame, target_epsg: int, label: str) -> gpd.GeoDataFrame:
+    """
+    Ensure GeoDataFrame is in the target CRS.
+    If CRS missing, assume it is already target (but warn).
+    """
+    if gdf is None or gdf.empty:
         return gdf
 
+    target = f"EPSG:{int(target_epsg)}"
+
     if gdf.crs is None:
-        logging.warning("CRS missing for %s; assuming %s", label, target_crs)
-        return gdf.set_crs(target_crs, allow_override=True)
+        logging.warning("CRS missing for %s; assuming %s", label, target)
+        return gdf.set_crs(target, allow_override=True)
 
-    # Normalize both to WKT for comparison
-    gdf_wkt = gdf.crs.to_wkt() if hasattr(gdf.crs, "to_wkt") else str(gdf.crs)
-    target_wkt = target_crs.to_wkt() if hasattr(target_crs, "to_wkt") else str(target_crs)
+    try:
+        if gdf.crs.to_string() != target:
+            return gdf.to_crs(target)
+    except Exception:
+        # last resort
+        if str(gdf.crs) != target:
+            return gdf.to_crs(target)
 
-    if gdf_wkt != target_wkt:
-        logging.warning(
-            "Reprojecting %s from %s to %s", label, gdf.crs, target_crs
-        )
-        return gdf.to_crs(target_crs)
     return gdf
 
-def aggregate_tile_from_perfile_gpkgs(tile_id, tile_dir, output_tiles_dir, imagery_dir, verbose=False):
-    """Build <tile_id>_TCN_aggregated.gpkg from per-file GPKGs; also write SubTileStats using
-       polygons from ArcticMosaic_<tile_id>_tiles.shp and exposure from InputMosaicCutlinesVector."""
-    t0 = time.perf_counter()
+def _as_float_array(gdf: gpd.GeoDataFrame, col: str) -> np.ndarray:
+    if gdf is None or gdf.empty or col not in gdf.columns:
+        return np.zeros(0, dtype=float)
+    return pd.to_numeric(gdf[col], errors="coerce").fillna(0.0).astype(float).to_numpy()
 
+def _as_int(x: float) -> int:
+    return int(np.round(float(x)))
+
+def _axial_mean_deg_weighted(angles_deg: np.ndarray, weights: np.ndarray) -> float:
+    # axial mean in [0,180)
+    if angles_deg.size == 0 or weights.size == 0 or float(weights.sum()) <= 0:
+        return -1.0
+    a = (angles_deg.astype(float) % 180.0)
+    w = weights.astype(float)
+    if a.size != w.size:
+        return -1.0
+    theta = np.deg2rad(2.0 * a)
+    C = float(np.sum(w * np.cos(theta)))
+    S = float(np.sum(w * np.sin(theta)))
+    if C == 0.0 and S == 0.0:
+        return -1.0
+    return float((np.rad2deg(np.arctan2(S, C)) / 2.0) % 180.0)
+
+def _tile_summary_xml(x: Dict[str, Any]) -> str:
+    # small + stable; no giant inline template inside the main function
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<TileTCNSummary tile_id="{x['tile_id']}">
+  <CRS>
+    <EPSG>{x.get('epsg', '')}</EPSG>
+    <RasterCRS_WKT><![CDATA[{x.get('raster_crs_wkt','')}]]></RasterCRS_WKT>
+    <Units>meters</Units>
+  </CRS>
+  <IDs>
+    <IDVersion>{x.get('id_version','')}</IDVersion>
+  </IDs>
+  <Totals>
+    <NumComponents>{x.get('num_components',0)}</NumComponents>
+    <TotalTCNLength_m>{float(x.get('total_tcn_length_m',0.0)):.6f}</TotalTCNLength_m>
+    <LargestComponentSize_m>{float(x.get('largest_component_size_m',0.0)):.6f}</LargestComponentSize_m>
+    <AverageComponentSize_m>{float(x.get('average_component_size_m',0.0)):.6f}</AverageComponentSize_m>
+    <NumGraphNodes>{x.get('num_graph_nodes',0)}</NumGraphNodes>
+    <NumGraphEdges>{x.get('num_graph_edges',0)}</NumGraphEdges>
+    <EndNodesCount>{x.get('end_nodes_count',0)}</EndNodesCount>
+    <JunctionNodesCount>{x.get('junction_nodes_count',0)}</JunctionNodesCount>
+    <AverageNodeDegree>{float(x.get('average_node_degree',0.0)):.6f}</AverageNodeDegree>
+    <MeanEdgeLength_m>{float(x.get('mean_edge_length_m',0.0)):.6f}</MeanEdgeLength_m>
+    <MeanEdgeOrientation_StepWeighted_deg>{float(x.get('mean_edge_orientation_deg_stepweighted',-1.0)):.6f}</MeanEdgeOrientation_StepWeighted_deg>
+    <NumEdges>{x.get('num_edges',0)}</NumEdges>
+  </Totals>
+</TileTCNSummary>
+""".strip()
+
+# -----------------------------
+# main function
+# -----------------------------
+
+def aggregate_tile_from_perfile_gpkgs(
+    tile_id: str,
+    output_tiles_dir: str,
+    imagery_dir: str,
+    *,
+    id_version: str,
+    target_epsg: int = 3338,
+    subtile_area_fallback_m2: float = 375_000_000.0,
+    perfile_glob: str = "*_TCN.gpkg",
+    out_name: Optional[str] = None,
+    verbose: bool = False,
+):
+    """
+    Build <tile_id>_TCN_summary.gpkg from per-file GPKGs under <output_tiles_dir>/<tile_id>/.
+
+    Enforces EPSG:3338 on all vector layers before computing areas/coverage and before writing.
+    Writes:
+      - GraphTheoraticEdges
+      - GraphTheoraticNodes
+      - GraphTheoraticComponents
+      - SubTileStats (polygons + per-subtile metrics)
+      - global_stats (sqlite table) + XML metadata
+    """
+    t0 = time.perf_counter()
+    target_crs = f"EPSG:{int(target_epsg)}"
+
+    tile_dir = os.path.join(output_tiles_dir, str(tile_id))
     if not os.path.isdir(tile_dir):
-        logging.error(f"[{tile_id}] missing tile dir: {tile_dir}")
+        logging.error("[%s] missing tile dir: %s", tile_id, tile_dir)
         return None
 
-    # ---- load tile polygons once (by TILENAME) ----
-    tiles_shp = os.path.join(imagery_dir, tile_id, f"ArcticMosaic_{tile_id}_tiles.shp")
+    gpkg_files = sorted(glob.glob(os.path.join(tile_dir, perfile_glob)))
+    if not gpkg_files:
+        logging.error("[%s] no per-file gpkg found in %s (glob=%s)", tile_id, tile_dir, perfile_glob)
+        return None
+
+    # ---- load tiles.shp -> mapping from TILENAME to geometry, all in target CRS ----
+    tiles_shp = os.path.join(imagery_dir, str(tile_id), f"ArcticMosaic_{tile_id}_tiles.shp")
     tile_geom_by_name = {}
-    tiles_gdf = None
-    tiles_crs = None
     if os.path.exists(tiles_shp):
         try:
             tiles_gdf = gpd.read_file(tiles_shp)
-            if tiles_gdf.crs is None:
-                logging.warning(f"[{tile_id}] tiles.shp has no CRS; will set later from data CRS if available")
-                tiles_gdf=tiles_gdf.set_crs(3338)
-            elif tiles_gdf.crs != 3338:
-                tiles_gdf=tiles_gdf.to_crs(3338)
-
-            tiles_crs = tiles_gdf.crs
-            if "TILENAME" not in tiles_gdf.columns:
-                logging.warning(f"[{tile_id}] TILENAME missing in tiles.shp; cannot map sub-tile polygons")
-            else:
-                # keep only polygonal features
+            tiles_gdf = _to_target_crs(tiles_gdf, target_epsg, f"{tile_id} tiles.shp")
+            if "TILENAME" in tiles_gdf.columns:
                 poly_mask = tiles_gdf.geometry.apply(
-                    lambda g: getattr(g, "geom_type", "") in ("Polygon", "MultiPolygon"))
+                    lambda g: getattr(g, "geom_type", "") in ("Polygon", "MultiPolygon")
+                )
                 tiles_gdf = tiles_gdf.loc[poly_mask].copy()
                 tile_geom_by_name = {
-                    _norm_key(str(v)): geom
+                    _norm_key(v): geom
                     for v, geom in zip(tiles_gdf["TILENAME"], tiles_gdf.geometry)
                     if geom is not None
                 }
+            else:
+                logging.warning("[%s] tiles.shp missing TILENAME: %s", tile_id, tiles_shp)
         except Exception as e:
-            logging.warning(f"[{tile_id}] failed to read tiles.shp: {e}")
+            logging.warning("[%s] failed reading tiles.shp (%s): %s", tile_id, tiles_shp, e)
     else:
-        logging.warning(f"[{tile_id}] tiles.shp not found at {tiles_shp}")
+        logging.warning("[%s] tiles.shp not found: %s", tile_id, tiles_shp)
 
-    edges_gdfs, nodes_gdfs, comps_gdfs = [], [], []
-    sub_rows = []
-    crs_wkt = None
+    # ---- read + compute ----
+    edges_parts, nodes_parts, comps_parts = [], [], []
+    sub_rows: List[Dict[str, Any]] = []
 
     with StageTimer(verbose, f"[{tile_id}]", "READ per-file GPKGs"):
-        gpkg_files = list(_iter_perfile(tile_dir, tile_id))
-        if not gpkg_files:
-            logging.error(f"[{tile_id}] no *.gpkg files found in {tile_dir}")
-            return None
-
         for gpkg in gpkg_files:
-            bn = os.path.basename(gpkg).lower()
-            # skip tile-level aggregates / non-subtile files
-            if bn.endswith("_tcn_aggregated.gpkg") or "_tcn_agg" in bn or bn == f"{tile_id.lower()}.gpkg":
-                continue
-
-            layers = _listlayers_safe(gpkg)
+            layers = set()
+            try:
+                layers = set(list_gpkg_layers_sqlite(gpkg))
+            except Exception:
+                pass
 
             e_gdf = n_gdf = c_gdf = None
 
             if "GraphTheoraticEdges" in layers:
                 try:
                     e_gdf = gpd.read_file(gpkg, layer="GraphTheoraticEdges")
-
-                    # Set canonical CRS once
-                    if crs_wkt is None and e_gdf.crs:
-                        crs_wkt = e_gdf.crs.to_wkt()
-
-                    # Normalize to canonical CRS
-                    e_gdf = _ensure_crs(
-                        e_gdf, crs_wkt, f"edges {os.path.basename(gpkg)}"
-                    )
-
-                    edges_gdfs.append(e_gdf)
+                    e_gdf = _to_target_crs(e_gdf, target_epsg, f"edges {os.path.basename(gpkg)}")
+                    if e_gdf is not None and not e_gdf.empty:
+                        edges_parts.append(e_gdf)
                 except Exception as e:
-                    logging.warning(f"[{os.path.basename(gpkg)}] edges read fail: {e}")
+                    logging.warning("[%s] edges read fail (%s): %s", tile_id, os.path.basename(gpkg), e)
 
             if "GraphTheoraticNodes" in layers:
                 try:
                     n_gdf = gpd.read_file(gpkg, layer="GraphTheoraticNodes")
-
-                    if crs_wkt is None and n_gdf.crs:
-                        crs_wkt = n_gdf.crs.to_wkt()
-
-                    n_gdf = _ensure_crs(
-                        n_gdf, crs_wkt, f"nodes {os.path.basename(gpkg)}"
-                    )
-
-                    nodes_gdfs.append(n_gdf)
+                    n_gdf = _to_target_crs(n_gdf, target_epsg, f"nodes {os.path.basename(gpkg)}")
+                    if n_gdf is not None and not n_gdf.empty:
+                        nodes_parts.append(n_gdf)
                 except Exception as e:
-                    logging.warning(f"[{os.path.basename(gpkg)}] nodes read fail: {e}")
+                    logging.warning("[%s] nodes read fail (%s): %s", tile_id, os.path.basename(gpkg), e)
 
             if "GraphTheoraticComponents" in layers:
                 try:
                     c_gdf = gpd.read_file(gpkg, layer="GraphTheoraticComponents")
-
-                    if crs_wkt is None and c_gdf.crs:
-                        crs_wkt = c_gdf.crs.to_wkt()
-
-                    c_gdf = _ensure_crs(
-                        c_gdf, crs_wkt, f"comps {os.path.basename(gpkg)}"
-                    )
-
-                    comps_gdfs.append(c_gdf)
+                    c_gdf = _to_target_crs(c_gdf, target_epsg, f"comps {os.path.basename(gpkg)}")
+                    if c_gdf is not None and not c_gdf.empty:
+                        comps_parts.append(c_gdf)
                 except Exception as e:
-                    logging.warning(f"[{tile_id}] comps read fail: {e}")
+                    logging.warning("[%s] comps read fail (%s): %s", tile_id, os.path.basename(gpkg), e)
 
-            # ---- per-subtile metrics (from this per-file GPKG) ----
-            # Components-derived totals
-            if c_gdf is not None and not c_gdf.empty:
-                num_nodes_arr = c_gdf.get("num_nodes", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
-                avg_degree_arr = c_gdf.get("avg_degree", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
-                total_len_arr = c_gdf.get("total_length_m", pd.Series(dtype=float)).fillna(0).astype(
-                    float).to_numpy()
-                endnodes_arr = c_gdf.get("num_endnodes", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
-                junctions_arr = c_gdf.get("num_junctions", pd.Series(dtype=float)).fillna(0).astype(
-                    float).to_numpy()
+            # ---- per-subtile metrics ----
+            subtile_id = _subtile_id_from_basename(gpkg)
 
-                sub_num_graph_nodes_sum = int(np.round(num_nodes_arr.sum()))
-                sub_num_graph_edges_sum = int(np.round(0.5 * (avg_degree_arr * num_nodes_arr).sum()))
-                sub_end_nodes_count_sum = int(np.round(endnodes_arr.sum()))
-                sub_junction_nodes_count_sum = int(np.round(junctions_arr.sum()))
+            # geometry from tiles.shp
+            subtile_geom = None
+            if tile_geom_by_name:
+                for k in _make_tilename_keys(subtile_id):
+                    geom = tile_geom_by_name.get(_norm_key(k))
+                    if geom is not None:
+                        subtile_geom = geom
+                        break
 
-                sub_total_tcn_length_m_sum = float(total_len_arr.sum())
-                sub_num_components = int(len(c_gdf))
-                sub_average_component_size_m = float(np.mean(total_len_arr)) if sub_num_components > 0 else 0.0
-                sub_largest_component_size_m = float(np.max(total_len_arr)) if sub_num_components > 0 else 0.0
-            else:
-                sub_num_graph_nodes_sum = sub_num_graph_edges_sum = sub_end_nodes_count_sum = sub_junction_nodes_count_sum = 0
-                sub_total_tcn_length_m_sum = 0.0
-                sub_num_components = 0
-                sub_average_component_size_m = sub_largest_component_size_m = 0.0
+            subtile_area_m2 = float(subtile_geom.area) if subtile_geom is not None else float(subtile_area_fallback_m2)
 
-            # Edges-derived metrics
-            if e_gdf is not None and not e_gdf.empty:
-                edge_lengths = e_gdf.get("length_m", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
-                edge_orients = e_gdf.get("orientation_deg_axial", pd.Series(dtype=float)).fillna(0).astype(
-                    float).to_numpy()
-                if len(edge_lengths) > 0:
-                    p95 = np.percentile(edge_lengths, 95)
-                    trimmed = edge_lengths[edge_lengths <= p95]
-                    sub_mean_edge_length_m = float(trimmed.mean()) if len(trimmed) else 0.0
-                else:
-                    sub_mean_edge_length_m = 0.0
-                sub_mean_edge_orientation_deg_stepweighted = (
-                    _axial_mean_deg_weighted(edge_orients, edge_lengths) if edge_lengths.sum() > 0 else -1.0
-                )
-                sub_num_edges_branchlevel = int(len(e_gdf))
+            # components-derived totals
+            num_nodes_arr = _as_float_array(c_gdf, "num_nodes")
+            avg_degree_arr = _as_float_array(c_gdf, "avg_degree")
+            total_len_arr = _as_float_array(c_gdf, "total_length_m")
+            endnodes_arr = _as_float_array(c_gdf, "num_endnodes")
+            junctions_arr = _as_float_array(c_gdf, "num_junctions")
+
+            sub_num_graph_nodes_sum = _as_int(num_nodes_arr.sum()) if num_nodes_arr.size else 0
+            sub_num_graph_edges_sum = _as_int(0.5 * (avg_degree_arr * num_nodes_arr).sum()) if num_nodes_arr.size else 0
+            sub_end_nodes_count_sum = _as_int(endnodes_arr.sum()) if endnodes_arr.size else 0
+            sub_junction_nodes_count_sum = _as_int(junctions_arr.sum()) if junctions_arr.size else 0
+
+            sub_total_tcn_length_m_sum = float(total_len_arr.sum()) if total_len_arr.size else 0.0
+            sub_num_components = int(total_len_arr.size) if total_len_arr.size else 0
+            sub_average_component_size_m = float(total_len_arr.mean()) if total_len_arr.size else 0.0
+            sub_largest_component_size_m = float(total_len_arr.max()) if total_len_arr.size else 0.0
+
+            # edges-derived metrics
+            edge_lengths = _as_float_array(e_gdf, "length_m")
+            edge_orients = _as_float_array(e_gdf, "orientation_deg_axial")
+
+            if edge_lengths.size:
+                p95 = np.percentile(edge_lengths, 95)
+                trimmed = edge_lengths[edge_lengths <= p95]
+                sub_mean_edge_length_m = float(trimmed.mean()) if trimmed.size else 0.0
+                sub_mean_edge_orientation_deg_stepweighted = _axial_mean_deg_weighted(edge_orients, edge_lengths)
+                sub_num_edges_branchlevel = int(edge_lengths.size)
             else:
                 sub_mean_edge_length_m = 0.0
                 sub_mean_edge_orientation_deg_stepweighted = -1.0
                 sub_num_edges_branchlevel = 0
 
-            sub_average_node_degree = (
-                        2.0 * sub_num_graph_edges_sum / sub_num_graph_nodes_sum) if sub_num_graph_nodes_sum > 0 else 0.0
+            sub_average_node_degree = (2.0 * sub_num_graph_edges_sum / sub_num_graph_nodes_sum) if sub_num_graph_nodes_sum > 0 else 0.0
 
-            # ---- geometry from tiles.shp by TILENAME ----
-            subtile_id = _subtile_id_from_basename(gpkg)
-            subtile_geom = None
-            if tile_geom_by_name:
-                keys = _make_tilename(subtile_id)
-                for k in keys:
-                    geom = tile_geom_by_name.get(_norm_key(k))
-                    if geom is not None:
-                        subtile_geom = geom
-                        break
-            if subtile_geom is None:
-                logging.warning(f"[{tile_id}/{subtile_id}/{_make_tilename(subtile_id)}]"
-                                " no polygon in tiles.shp; using  falling back to default SUBTILE_AREA_M2")
-
-            # ---- exposure from cutlines (area-weighted norm_input_exp) ----
-            subtile_area_m2 = float(subtile_geom.area) if subtile_geom is not None else SUBTILE_AREA_M2
-            # ---- exposure from cutlines (area-weighted norm_input_exp) ----
-            norm_input_exp_coverage_weighted = None
-            input_coverage = None
+            # exposure/coverage from cutlines
+            norm_input_exp_coverage_weighted = 0.0
+            input_coverage = 0.0
             if "InputMosaicCutlinesVector" in layers:
                 try:
                     cut = gpd.read_file(gpkg, layer="InputMosaicCutlinesVector")
-                    # EPSG:3338 (equal-area) is expected for areas; if CRS is missing, set from crs_wkt if available
-                    if cut.crs is None and crs_wkt:
-                        cut = cut.set_crs(crs_wkt)
-                    if cut.crs != tiles_crs:
-                        cut = cut.to_crs(tiles_crs)
+                    cut = _to_target_crs(cut, target_epsg, f"cutlines {os.path.basename(gpkg)}")
 
-                    # polygonal only
                     poly_mask = cut.geometry.apply(
                         lambda g: getattr(g, "geom_type", "") in ("Polygon", "MultiPolygon")
                     )
                     cut = cut.loc[poly_mask].copy()
+
                     if not cut.empty:
                         areas = pd.to_numeric(cut.geometry.area, errors="coerce").fillna(0.0).astype(float)
                         total_area = float(areas.sum())
 
                         if "norm_input_exp" in cut.columns and total_area > 0:
                             exp = pd.to_numeric(cut["norm_input_exp"], errors="coerce").fillna(0.0).astype(float)
-                            val = float((exp * areas).sum() / total_area)
-                            norm_input_exp_coverage_weighted = max(0.0, min(1.0, val))
+                            norm_input_exp_coverage_weighted = float((exp * areas).sum() / total_area)
+                            norm_input_exp_coverage_weighted = max(0.0, min(1.0, norm_input_exp_coverage_weighted))
 
-                        # CHANGED: use subtile_area_m2 instead of SUBTILE_AREA_M2
-                        if total_area > 0 and subtile_area_m2 and subtile_area_m2 > 0:
-                            cov = total_area / float(subtile_area_m2)
-                            cov = max(0.0, min(1.0, cov))
-
-                            # optional: snap near-1 to exactly 1.0
-                            EPS = 1e-4
-                            if abs(cov - 1.0) < EPS:
-                                cov = 1.0
-
-                            input_coverage = cov
-                            logging.info(
-                                f"input coverage: {input_coverage} "
-                                f"total CUTLINEs area: {total_area} "
-                                f"subtile area: {subtile_area_m2}"
-                            )
+                        if total_area > 0 and subtile_area_m2 > 0:
+                            input_coverage = max(0.0, min(1.0, total_area / subtile_area_m2))
                 except Exception as e:
-                    logging.warning(f"[{os.path.basename(gpkg)}] cutlines exposure failed: {e}")
+                    logging.warning("[%s] cutlines exposure failed (%s): %s", tile_id, os.path.basename(gpkg), e)
 
-                if input_coverage is None:
-                    input_coverage = 0.0
-                if norm_input_exp_coverage_weighted is None:
-                    norm_input_exp_coverage_weighted = 0.0
-            # If still no geometry, last resort: bbox from edges (not ideal)
+            # last-resort geometry fallback: bbox from edges (only if you really want *some* geom)
             if subtile_geom is None and e_gdf is not None and not e_gdf.empty:
                 try:
                     minx, miny, maxx, maxy = e_gdf.total_bounds
-                    subtile_geom = shapely.geometry.box(minx, miny, maxx, maxy)
+                    subtile_geom = shapely_box(minx, miny, maxx, maxy)
                 except Exception:
-                    pass
+                    subtile_geom = None
 
             sub_rows.append({
                 "tile_id": tile_id,
                 "sub_tile_id": subtile_id,
-                "id_version": ID_VERSION,
-                "raster_crs_wkt": crs_wkt or "",
+                "id_version": id_version,
+                "epsg": int(target_epsg),
                 "num_components": int(sub_num_components),
                 "total_tcn_length_m": float(sub_total_tcn_length_m_sum),
                 "largest_component_size_m": float(sub_largest_component_size_m),
@@ -564,58 +594,51 @@ def aggregate_tile_from_perfile_gpkgs(tile_id, tile_dir, output_tiles_dir, image
                 "mean_edge_length_m": float(sub_mean_edge_length_m),
                 "mean_edge_orientation_deg_stepweighted": float(sub_mean_edge_orientation_deg_stepweighted),
                 "num_edges": int(sub_num_edges_branchlevel),
-                "norm_input_exp_coverage_weighted": None if norm_input_exp_coverage_weighted is None else float(
-                    norm_input_exp_coverage_weighted),
-                "input_coverage": None if input_coverage is None else float(
-                    input_coverage),
+                "norm_input_exp_coverage_weighted": float(norm_input_exp_coverage_weighted),
+                "input_coverage": float(input_coverage),
                 "geometry": subtile_geom,
             })
 
-    if not edges_gdfs and not nodes_gdfs and not comps_gdfs:
-        logging.error(f"[{tile_id}] no per-file layers to aggregate (dir={tile_dir})")
+    if not edges_parts and not nodes_parts and not comps_parts:
+        logging.error("[%s] nothing to aggregate (no edges/nodes/comps in %s)", tile_id, tile_dir)
         return None
 
-    # ---- aggregate (tile-level) unchanged ----
+    edges_all = gpd.GeoDataFrame(pd.concat(edges_parts, ignore_index=True)) if edges_parts else gpd.GeoDataFrame(geometry=[])
+    nodes_all = gpd.GeoDataFrame(pd.concat(nodes_parts, ignore_index=True)) if nodes_parts else gpd.GeoDataFrame(geometry=[])
+    comps_all = gpd.GeoDataFrame(pd.concat(comps_parts, ignore_index=True)) if comps_parts else gpd.GeoDataFrame(geometry=[])
 
-    edges_all = gpd.GeoDataFrame(pd.concat(edges_gdfs, ignore_index=True)) if edges_gdfs else gpd.GeoDataFrame(geometry=[])
-    nodes_all = gpd.GeoDataFrame(pd.concat(nodes_gdfs, ignore_index=True)) if nodes_gdfs else gpd.GeoDataFrame(geometry=[])
-    comps_all = gpd.GeoDataFrame(pd.concat(comps_gdfs, ignore_index=True)) if comps_gdfs else gpd.GeoDataFrame(geometry=[])
+    for label, gdf in (("edges_all", edges_all), ("nodes_all", nodes_all), ("comps_all", comps_all)):
+        if gdf is not None and not gdf.empty:
+            gdf = _to_target_crs(gdf, target_epsg, f"{tile_id} {label}")
+            if label == "edges_all": edges_all = gdf
+            if label == "nodes_all": nodes_all = gdf
+            if label == "comps_all": comps_all = gdf
 
-    if not comps_all.empty:
-        num_nodes_arr = comps_all.get("num_nodes", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
-        avg_degree_arr = comps_all.get("avg_degree", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
-        total_len_arr = comps_all.get("total_length_m", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
-        endnodes_arr = comps_all.get("num_endnodes", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
-        junctions_arr = comps_all.get("num_junctions", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
+    # ---- tile-level stats ----
+    num_nodes_arr = _as_float_array(comps_all, "num_nodes")
+    avg_degree_arr = _as_float_array(comps_all, "avg_degree")
+    total_len_arr = _as_float_array(comps_all, "total_length_m")
+    endnodes_arr = _as_float_array(comps_all, "num_endnodes")
+    junctions_arr = _as_float_array(comps_all, "num_junctions")
 
-        num_graph_nodes_sum = int(np.round(num_nodes_arr.sum()))
-        num_graph_edges_sum = int(np.round(0.5 * (avg_degree_arr * num_nodes_arr).sum()))
-        end_nodes_count_sum = int(np.round(endnodes_arr.sum()))
-        junction_nodes_count_sum = int(np.round(junctions_arr.sum()))
+    num_graph_nodes_sum = _as_int(num_nodes_arr.sum()) if num_nodes_arr.size else 0
+    num_graph_edges_sum = _as_int(0.5 * (avg_degree_arr * num_nodes_arr).sum()) if num_nodes_arr.size else 0
+    end_nodes_count_sum = _as_int(endnodes_arr.sum()) if endnodes_arr.size else 0
+    junction_nodes_count_sum = _as_int(junctions_arr.sum()) if junctions_arr.size else 0
 
-        total_tcn_length_m_sum = float(total_len_arr.sum())
-        num_components = int(len(comps_all))
-        average_component_size_m = float(np.mean(total_len_arr)) if num_components > 0 else 0.0
-        largest_component_size_m = float(np.max(total_len_arr)) if num_components > 0 else 0.0
-    else:
-        num_graph_nodes_sum = num_graph_edges_sum = end_nodes_count_sum = junction_nodes_count_sum = 0
-        total_tcn_length_m_sum = 0.0
-        num_components = 0
-        average_component_size_m = largest_component_size_m = 0.0
+    total_tcn_length_m_sum = float(total_len_arr.sum()) if total_len_arr.size else 0.0
+    num_components = int(total_len_arr.size) if total_len_arr.size else 0
+    average_component_size_m = float(total_len_arr.mean()) if total_len_arr.size else 0.0
+    largest_component_size_m = float(total_len_arr.max()) if total_len_arr.size else 0.0
 
-    # ---- edge-derived stats (tile scope) ----
-    if not edges_all.empty:
-        edge_lengths = edges_all.get("length_m", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
-        edge_orients = edges_all.get("orientation_deg_axial", pd.Series(dtype=float)).fillna(0).astype(float).to_numpy()
-        if len(edge_lengths) > 0:
-            p95 = np.percentile(edge_lengths, 95)
-            trimmed = edge_lengths[edge_lengths <= p95]
-            mean_edge_length_m = float(trimmed.mean()) if len(trimmed) else 0.0
-        else:
-            mean_edge_length_m = 0.0
-        mean_edge_orientation_deg_stepweighted = _axial_mean_deg_weighted(edge_orients,
-                                                                          edge_lengths) if edge_lengths.sum() > 0 else -1.0
-        num_edges_branchlevel = int(len(edges_all))
+    edge_lengths = _as_float_array(edges_all, "length_m")
+    edge_orients = _as_float_array(edges_all, "orientation_deg_axial")
+    if edge_lengths.size:
+        p95 = np.percentile(edge_lengths, 95)
+        trimmed = edge_lengths[edge_lengths <= p95]
+        mean_edge_length_m = float(trimmed.mean()) if trimmed.size else 0.0
+        mean_edge_orientation_deg_stepweighted = _axial_mean_deg_weighted(edge_orients, edge_lengths)
+        num_edges_branchlevel = int(edge_lengths.size)
     else:
         mean_edge_length_m = 0.0
         mean_edge_orientation_deg_stepweighted = -1.0
@@ -623,71 +646,35 @@ def aggregate_tile_from_perfile_gpkgs(tile_id, tile_dir, output_tiles_dir, image
 
     average_node_degree = (2.0 * num_graph_edges_sum / num_graph_nodes_sum) if num_graph_nodes_sum > 0 else 0.0
 
-    # ---- write outputs (existing layers + new SubTileStats) ----
-    gpkg_path = os.path.join(output_tiles_dir, f"{tile_id}", f"{tile_id}_TCN_summary.gpkg")
-    os.makedirs(os.path.dirname(gpkg_path), exist_ok=True)
-    logging.info(f"################################################################GPKG path {gpkg_path}")
-    # Remove if existing
-    if os.path.exists(gpkg_path):
-        os.remove(gpkg_path)
-        logging.info(f"#################################################for new summary removing {gpkg_path}")
+    # ---- write outputs ----
+    if out_name is None:
+        out_name = f"{tile_id}_TCN_summary.gpkg"
+    gpkg_path = os.path.join(tile_dir, out_name)
+    _remove_sqlite_sidecars(gpkg_path)
 
-    def _write_layer(gdf, layer):
+    def _write_layer(gdf: gpd.GeoDataFrame, layer: str) -> None:
         if gdf is None or gdf.empty:
             return
-        if crs_wkt and (gdf.crs is None):
-            gdf = gdf.set_crs(crs_wkt)
         mode = "a" if os.path.exists(gpkg_path) else "w"
         gdf.to_file(gpkg_path, layer=layer, driver="GPKG", mode=mode)
-        logging.info(f"[{tile_id}] wrote {len(gdf):,} to '{layer}'")
 
-    if crs_wkt is None and e_gdf.crs:
-        crs_wkt = e_gdf.crs.to_wkt()
-
-    with StageTimer(verbose, f"[{tile_id}]", "WRITE aggregate layers"):
+    with StageTimer(verbose, f"[{tile_id}]", "WRITE layers"):
         _write_layer(edges_all, "GraphTheoraticEdges")
         _write_layer(nodes_all, "GraphTheoraticNodes")
         _write_layer(comps_all, "GraphTheoraticComponents")
 
-        # New: per-subtile polygon layer from tiles.shp + cutline exposure
         if sub_rows:
             st_df = pd.DataFrame(sub_rows)
-            # cast numerics to avoid pyogrio warnings
-            int_cols = ["num_components", "num_graph_nodes", "num_graph_edges", "end_nodes_count",
-                        "junction_nodes_count", "num_edges"]
-            float_cols = [
-                "total_tcn_length_m", "largest_component_size_m", "average_component_size_m",
-                "average_node_degree", "mean_edge_length_m", "mean_edge_orientation_deg_stepweighted",
-                "norm_input_exp_coverage_weighted", "input_coverage",
-            ]
-            for c in int_cols:
-                if c in st_df.columns:
-                    st_df[c] = pd.to_numeric(st_df[c], errors="coerce").fillna(0).astype(np.int64)
-            for c in float_cols:
-                if c in st_df.columns:
-                    st_df[c] = pd.to_numeric(st_df[c], errors="coerce").astype(float)
+            st_gdf = gpd.GeoDataFrame(st_df, geometry="geometry", crs=target_crs)
+            _write_layer(st_gdf, "SubTileStats")
 
-            # New: write SubTileStats with correct CRS handling (tiles.shp -> target data CRS)
-            if "geometry" in st_df.columns:
-                st_gdf = gpd.GeoDataFrame(st_df, geometry="geometry")
-
-                # 1) Label geometries with the source CRS from tiles.shp (e.g., EPSG:3413)
-                if tiles_crs:
-                    st_gdf = st_gdf.set_crs(tiles_crs, allow_override=True)
-
-                # 2) Reproject to target data CRS (from per-file layers; typically EPSG:3338)
-                target_crs_wkt = crs_wkt or (tiles_crs.to_wkt() if tiles_crs else None)
-                if target_crs_wkt and (not tiles_crs or tiles_crs.to_wkt() != target_crs_wkt):
-                    st_gdf = st_gdf.to_crs(target_crs_wkt)
-
-                _write_layer(st_gdf, "SubTileStats")
-
-    # -------- write non-spatial global_stats + XML (unchanged) --------
+    # ---- write global_stats + XML ----
     tile_row = {
         "id": 1,
         "tile_id": tile_id,
-        "id_version": ID_VERSION,
-        "raster_crs_wkt": crs_wkt or "",
+        "id_version": id_version,
+        "epsg": int(target_epsg),
+        "raster_crs_wkt": gpd.GeoSeries(crs=target_crs).crs.to_wkt(),
         "num_components": int(num_components),
         "total_tcn_length_m": float(total_tcn_length_m_sum),
         "largest_component_size_m": float(largest_component_size_m),
@@ -705,71 +692,19 @@ def aggregate_tile_from_perfile_gpkgs(tile_id, tile_dir, output_tiles_dir, image
     with sqlite3.connect(gpkg_path) as conn:
         with sqlite_fast_writes(conn):
             row_df = pd.DataFrame([tile_row])
-            with StageTimer(verbose, f"[{tile_id}]", "WRITE global_stats + XML"):
-                write_table(conn, "global_stats", row_df[[
-                    "id","tile_id","id_version","raster_crs_wkt",
-                    "num_components","total_tcn_length_m",
-                    "largest_component_size_m","average_component_size_m",
-                    "num_graph_nodes","num_graph_edges",
-                    "end_nodes_count","junction_nodes_count",
-                    "average_node_degree","mean_edge_length_m",
-                    "mean_edge_orientation_deg_stepweighted",
-                    "num_edges"
-                ]], pk_name="id")
+            write_table(conn, "global_stats", row_df, pk_name="id")
 
-                x = tile_row
-                xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<TileTCNSummary tile_id="{x['tile_id']}">
-  <CRS note="All per-tile layers and stats use the raster CRS">
-    <RasterCRS_WKT><![CDATA[{x['raster_crs_wkt']}]]></RasterCRS_WKT>
-    <Units>meters</Units>
-  </CRS>
-  <IDs>
-    <IDVersion>{x['id_version']}</IDVersion>
-    <Keys>
-      <Components>composite: (tile_id, file_id, component_id); also global_component_id = tile_id|file_id|component_id</Components>
-      <Edges>composite: (tile_id, file_id, edge_id)</Edges>
-      <Nodes>composite: (tile_id, file_id, node_id)</Nodes>
-    </Keys>
-  </IDs>
-  <Semantics>
-    <NodeClasses>endpoint: degree==1; junction: degree>=2; isolates (degree==0) are neither</NodeClasses>
-    <Lengths>
-      <ComponentAndTile>pixel-accurate: (# skeleton pixels) * step_len_m; no double-counting at junctions</ComponentAndTile>
-      <Edges>per-edge length (analysis only); sum of edge lengths may exceed component/tile totals</Edges>
-    </Lengths>
-    <Orientation>
-      <EdgeField>orientation_deg_axial (per-edge axial mean)</EdgeField>
-      <Aggregate>
-        <StepWeighted>mean_edge_orientation_deg_stepweighted (each pixel-step contributes equally)</StepWeighted>
-      </Aggregate>
-    </Orientation>
-    <OpenEdges>is_open_edge=1 means node_id_b==-1 (edge terminates without a key-node)</OpenEdges>
-  </Semantics>
-  <Totals>
-    <NumComponents>{x['num_components']}</NumComponents>
-    <TotalTCNLength_m>{x['total_tcn_length_m']:.6f}</TotalTCNLength_m>
-    <LargestComponentSize_m>{x['largest_component_size_m']:.6f}</LargestComponentSize_m>
-    <AverageComponentSize_m>{x['average_component_size_m']:.6f}</AverageComponentSize_m>
-    <NumGraphNodes>{x['num_graph_nodes']}</NumGraphNodes>
-    <NumGraphEdges>{x['num_graph_edges']}</NumGraphEdges>
-    <EndNodesCount>{x['end_nodes_count']}</EndNodesCount>
-    <JunctionNodesCount>{x['junction_nodes_count']}</JunctionNodesCount>
-    <AverageNodeDegree>{x['average_node_degree']:.6f}</AverageNodeDegree>
-    <MeanEdgeLength_m>{x['mean_edge_length_m']:.6f}</MeanEdgeLength_m>
-    <MeanEdgeOrientation_StepWeighted_deg>{x['mean_edge_orientation_deg_stepweighted']:.6f}</MeanEdgeOrientation_StepWeighted_deg>
-    <NumEdges>{x['num_edges']}</NumEdges>
-  </Totals>
-</TileTCNSummary>
-""".strip()
-                insert_xml_metadata(conn, xml, links=[
-                    {"reference_scope": "row", "table_name": "global_stats", "row_id_value": 1},
-                    {"reference_scope": "geopackage"}
-                ])
+            xml = _tile_summary_xml(tile_row)
+            insert_xml_metadata(conn, xml, links=[
+                {"reference_scope": "row", "table_name": "global_stats", "row_id_value": 1},
+                {"reference_scope": "geopackage"},
+            ])
 
     dt = time.perf_counter() - t0
-    logging.debug(f"[{tile_id}] aggregate-from-perfile done in {dt:.2f}s")
-    out_row = dict(tile_row); out_row["id"] = None
+    logging.info("[%s] wrote %s (subtiles=%d) in %.1fs", tile_id, os.path.basename(gpkg_path), len(sub_rows), dt)
+
+    out_row = dict(tile_row)
+    out_row["id"] = None
     return out_row
 
 #-------------</CODE ADDED for sub_tile aggregations>------------------------------------------------------
