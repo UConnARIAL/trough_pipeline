@@ -39,7 +39,13 @@ except Exception:
     HAVE_SCIPY = False
 
 
-from gt_gpkg_common import StageTimer, _expected_gpkg_name_for_tif, _gpkg_delete_layer, _has_table, _is_valid_gpkg, _records_to_gdf, _table_has_fields, axial_mean_deg, build_master_gpkg, combine_axial_deg, filter_done_tiffs, get_sub_tile_id, has_layer_sqlite, insert_xml_metadata, is_gpkg_complete_by_tail, is_valid_geopackage, list_gpkg_layers_sqlite, logp, pix_to_xy, sanity_check_paths, sqlite_fast_writes, write_table
+from gt_gpkg_common import (StageTimer, _expected_gpkg_name_for_tif, _gpkg_delete_layer, _has_table, _is_valid_gpkg,
+                            _records_to_gdf, _table_has_fields, axial_mean_deg,
+                            build_master_gpkg, combine_axial_deg, filter_done_tiffs, get_sub_tile_id,
+                            has_layer_sqlite, insert_xml_metadata, is_gpkg_complete_by_tail, is_valid_geopackage,
+                            list_gpkg_layers_sqlite, logp, pix_to_xy, sanity_check_paths, sqlite_fast_writes, write_table,
+                            cfg_get,
+                            )
 
 # ------------------------------ config ------------------------------
 SUBTILE_AREA_M2 = 375000000.0 # 400000000. USED if area cannot be found from the tile_id_tiles.shp
@@ -887,7 +893,8 @@ def main():
                 if res:
                     per_tile_rows.append(res)
 
-    build_master_gpkg(args.mosaic_gpkg, per_tile_rows, args.imagery_dir)
+    id_version = cfg_get(cfg, "project", "id_version")
+    build_master_gpkg(args.mosaic_gpkg, per_tile_rows, args.imagery_dir,id_version=id_version)
 
     elapsed = time.time() - start
     logging.info(f"Done in {elapsed/60:.1f} min | {elapsed/len(tile_tasks):.1f} s/tile")

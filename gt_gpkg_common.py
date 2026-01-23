@@ -103,27 +103,13 @@ from contextlib import contextmanager
 def sqlite_fast_writes(conn):
     """Speed up writes without changing content."""
     cur = conn.cursor()
-
-    # Save current settings
-    old_sync = conn.execute("PRAGMA synchronous;").fetchone()[0]
-    old_cache = conn.execute("PRAGMA cache_size;").fetchone()[0]
-    old_jmode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
-
-    # Apply faster settings
     cur.execute("PRAGMA journal_mode=MEMORY;")
     cur.execute("PRAGMA synchronous=OFF;")
     cur.execute("PRAGMA cache_size=-200000;")  # ~200MB page cache
     try:
         yield
     finally:
-        # Restore (best effort)
-        try: cur.execute(f"PRAGMA journal_mode={old_jmode};")
-        except Exception: pass
-        try: cur.execute(f"PRAGMA synchronous={old_sync};")
-        except Exception: pass
-        try: cur.execute(f"PRAGMA cache_size={old_cache};")
-        except Exception: pass
-        cur.close()
+        cur.execute("PRAGMA synchronous=FULL;")
 
 def write_table(conn, table_name, df, pk_name=None):
     """Create/replace table; optionally set INTEGER PRIMARY KEY 'pk_name'."""
@@ -413,9 +399,18 @@ def _records_to_gdf(records, crs_wkt):
         return None
     return gpd.GeoDataFrame(records, geometry="geometry", crs=crs_wkt or None)
 
+def cfg_get(cfg: dict, *keys, default=None):
+    cur = cfg
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
 
+def build_master_gpkg(mosaic_gpkg_path, per_tile_rows, imagery_dir,*,id_version=None):
+    if id_version is None:
+        id_version = globals().get("ID_VERSION","")
 
-def build_master_gpkg(mosaic_gpkg_path, per_tile_rows, imagery_dir):
     if not per_tile_rows:
         logging.warning("No per-tile rows to write to master.")
         return

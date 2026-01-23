@@ -83,7 +83,8 @@ from gt_gpkg_common import (
     logp,
     axial_mean_deg,
     check_gpkg_crs_all_layers,
-    build_tile_structured_path
+    build_tile_structured_path,
+    cfg_get
 )
 
 # -------------------- pipeline libs --------------------
@@ -101,14 +102,6 @@ def _load_toml(path: str | Path) -> dict:
     except Exception:
         import tomli     # py3.10 backport (pip/conda install tomli)
         return tomli.loads(raw.decode("utf-8"))
-
-def cfg_get(cfg: dict, *keys, default=None):
-    cur = cfg
-    for k in keys:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return cur
 
 def apply_thread_env(cfg: dict) -> None:
     # Keep your HPC-friendly defaults but config-driven
