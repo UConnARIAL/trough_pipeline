@@ -42,6 +42,85 @@ from shapely.ops import unary_union
 
 import glob
 
+from pathlib import Path
+from typing import Any, Optional
+import os
+
+def load_toml(path: str | Path) -> dict[str, Any]:
+    p = Path(path)
+    raw = p.read_bytes()
+    try:
+        import tomllib  # py3.11+
+        return tomllib.loads(raw.decode("utf-8"))
+    except Exception:
+        import tomli     # py3.10
+        return tomli.loads(raw.decode("utf-8"))
+
+def cfg_get(cfg: dict, *keys: str, default=None):
+    cur = cfg
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+def cfg_get_step(cfg: dict, step: str, *keys: str, default=None):
+    """
+    Step override precedence:
+      steps.<step>.<...>  (if present)
+      global <...>        (fallback)
+    Example: cfg_get_step(cfg,"subtile","runtime","workers",default=0)
+    """
+    v = cfg_get(cfg, "steps", step, *keys, default=None)
+    if v is not None:
+        return v
+    return cfg_get(cfg, *keys, default=default)
+
+def apply_thread_env(cfg: dict) -> None:
+    # must run BEFORE numpy/scipy/skimage imports in your entry scripts
+    ob = str(cfg_get(cfg, "runtime", "openblas_threads", default=1))
+    omp = str(cfg_get(cfg, "runtime", "omp_threads", default=1))
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", ob)
+    os.environ.setdefault("OMP_NUM_THREADS", omp)
+
+def resolve_workers(cfg: dict, step: str, cli_workers: Optional[int]) -> int:
+    """
+    CLI override > steps.<step>.runtime.workers > runtime.workers
+    Convention: 0 means auto.
+    """
+    if cli_workers is not None:
+        return int(cli_workers)
+    return int(cfg_get_step(cfg, step, "runtime", "workers", default=cfg_get(cfg, "runtime", "workers", default=0)) or 0)
+
+
+def finalize_workers(n_workers: int, *, cfg: dict) -> int:
+    """
+    Convert 0 (=auto) into a safe, positive worker count.
+    Always returns >= 1.
+    """
+    n_workers = int(n_workers or 0)
+    if n_workers > 0:
+        return n_workers
+
+    # auto mode
+    import psutil
+    total_mem_gb = psutil.virtual_memory().total / 1e9
+    hard_max = int(cfg_get(cfg, "runtime", "hard_max_workers", default=32) or 32)
+    max_gb_per_worker = float(cfg_get(cfg, "runtime", "max_gb_per_worker", default=64) or 64)
+
+    cpu_cnt = max(1, (os.cpu_count() or 1) - 1)
+    mem_based = max(1, int(total_mem_gb // max_gb_per_worker))
+    auto_workers = min(cpu_cnt, mem_based, hard_max)
+
+    return max(1, int(auto_workers))
+
+
+def get_id_version(cfg: dict) -> str:
+    return str(cfg_get(cfg, "project", "id_version", default="v1.0"))
+
+def get_target_epsg(cfg: dict) -> int:
+    return int(cfg_get(cfg, "crs", "target_epsg", default=3338))
+
 class StageTimer:
     """Tiny context manager for stage timing that logs on exit if enabled."""
     def __init__(self, enabled: bool, prefix: str, stage: str):
@@ -406,14 +485,15 @@ def cfg_get(cfg: dict, *keys, default=None):
             return default
         cur = cur[k]
     return cur
-
-def build_master_gpkg(mosaic_gpkg_path, per_tile_rows, imagery_dir,*,id_version=None):
+def build_master_gpkg(mosaic_gpkg_path, per_tile_rows, imagery_dir, id_version=None):
+    # Resolve id_version from (a) explicit arg, else (b) first row, else (c) legacy global, else error
     if id_version is None:
-        id_version = globals().get("ID_VERSION","")
-
-    if not per_tile_rows:
-        logging.warning("No per-tile rows to write to master.")
-        return
+        if per_tile_rows and isinstance(per_tile_rows[0], dict):
+            id_version = per_tile_rows[0].get("id_version") or None
+    if id_version is None:
+        id_version = globals().get("ID_VERSION")  # legacy compatibility if it exists
+    if not id_version:
+        raise ValueError("build_master_gpkg: id_version is required (pass id_version=... or include in per_tile_rows)")
 
     target_crs_wkt = next((r["raster_crs_wkt"] for r in per_tile_rows if r.get("raster_crs_wkt")), "")
 
@@ -541,7 +621,7 @@ def build_master_gpkg(mosaic_gpkg_path, per_tile_rows, imagery_dir,*,id_version=
 
     summary_row = {
         "id": 1,
-        "id_version": ID_VERSION,
+        "id_version": id_version,
         "raster_crs_wkt": target_crs_wkt or "",
         # headline totals
         "total_num_tiles": n_tiles,
@@ -737,9 +817,6 @@ def check_gpkg_crs_all_layers(gpkg_path: str, target_srs: str) -> list[str]:
             problems.append(f"RASTER CRS MISMATCH: table='{rt}' expected={target_srs}")
 
     return problems
-
-from pathlib import Path
-from typing import Optional
 
 from pathlib import Path
 from typing import Optional, Sequence

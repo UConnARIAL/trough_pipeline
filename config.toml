@@ -21,6 +21,7 @@ omp_threads = 1
 model_mask_dir = "../TCN_refac_test_imgs/"             # dir that contains ML model outputs (detections)
 master_dir = "../TCN_refac_test_imgs/"                 # step1 reads from here clean masks from detected masks
 output_root = "../TCN_refac_test_gpkgs"                # all step outputs rooted here
+mosaic_gpkg = "../TCN_refac_test_gpkgs/global_summary.gpkg"
 
 # Convenience subfolders (steps can override if needed)
 output_tiles_dir = "../TCN_refac_test_gpkgs"   # step1 writes per-file gpkg under tile_id/

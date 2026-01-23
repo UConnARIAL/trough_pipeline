@@ -16,20 +16,6 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 
 import sys
-import gc
-import argparse
-import multiprocessing as mp
-from contextlib import contextmanager
-from math import sin, cos, radians, atan2, degrees
-
-import shapely.geometry as sgeom
-
-import rasterio
-from rasterio.transform import xy as rio_xy
-from skimage.morphology import skeletonize
-from skan.csr import pixel_graph
-import networkx as nx
-import psutil
 
 # ---- SciPy optional (fast path) ----
 try:
@@ -38,13 +24,12 @@ try:
 except Exception:
     HAVE_SCIPY = False
 
-
 from gt_gpkg_common import (StageTimer, _expected_gpkg_name_for_tif, _gpkg_delete_layer, _has_table, _is_valid_gpkg,
                             _records_to_gdf, _table_has_fields, axial_mean_deg,
                             build_master_gpkg, combine_axial_deg, filter_done_tiffs, get_sub_tile_id,
                             has_layer_sqlite, insert_xml_metadata, is_gpkg_complete_by_tail, is_valid_geopackage,
                             list_gpkg_layers_sqlite, logp, pix_to_xy, sanity_check_paths, sqlite_fast_writes, write_table,
-                            cfg_get,
+                            cfg_get,load_toml,cfg_get,apply_thread_env,cfg_get,load_toml,resolve_workers,finalize_workers,get_id_version,get_target_epsg,
                             )
 
 # ------------------------------ config ------------------------------
@@ -56,13 +41,7 @@ COMPS_HEARTBEAT = 20000  # progress log every N components
 
 # ------------------------------ small logging helpers ------------------------------
 
-
-
 # ------------------------------ math helpers ------------------------------
-
-
-
-
 def fast_pix_to_xy_affine(trf, rr, cc):
     """Vectorized pixel-center to map coords using the affine transform."""
     rr = np.asarray(rr, dtype=float)
@@ -73,10 +52,6 @@ def fast_pix_to_xy_affine(trf, rr, cc):
 
 # ------------------------------ sqlite helpers ------------------------------
 
-
-
-
-
 def _listlayers_safe(path):
     try:
         return set(list_gpkg_layers_sqlite(path))
@@ -86,20 +61,8 @@ def _listlayers_safe(path):
 
 #---------- resume gpkg code helpers -------------------------------
 # --- put near your other utilities ---
-from typing import Sequence, Tuple, List
-
-
 #---------------- Sanity check for gpkg created by pipe line to decide to redo
-import sqlite3
-
-
-
-
-
 #</END gpkg sanity check>----Sanity check for gpkg created by pipe line to decide to redo
-
-
-
 # ------------------------------ per-tile processing updated to include the sub_cell gpkg--
 # --- NEW: helpers for per-file GPKG writing ---
 
@@ -707,65 +670,89 @@ def aggregate_tile_from_perfile_gpkgs(
     out_row["id"] = None
     return out_row
 
-#-------------</CODE ADDED for sub_tile aggregations>------------------------------------------------------
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--master_dir", required=True, help="Folder of tiles; each subfolder is a tile_id with *.tif masks")
-    p.add_argument("--output_tiles_dir", required=True, help="Output dir containing per-file GPKGs under <tile_id>/")
-    p.add_argument("--mosaic_gpkg", required=True, help="Output path for master GeoPackage (whole_mosaic.gpkg)")
-    p.add_argument("--imagery_dir", required=True, help="Folder with per-tile shapefiles ArcticMosaic_<tile_id>_tiles.shp")
-    p.add_argument("--workers", type=int, default=0, help="Processes; 0=auto (all-1, mem-capped)")
-    p.add_argument("--max_gb_per_worker", type=float, default=64, help="Estimated GB RAM per worker")
 
-    # Selecting the tile sequence in rank order
-    p.add_argument("--tile_rank_st", type=int, default=None, help="1-based start index of tiles to process (optional)")
-    p.add_argument("--tile_rank_end", type=int, default=None, help="1-based end index of tiles to process (optional)")
-
-    p.add_argument("--defer-tile-agg", action="store_true",
-                   help="Skip per-tile stats and GPKG writes in pass-1; only write per-file GPKGs")
-    p.add_argument("--tifs_per_run", type=int, default=35, help="Max number of items to process this run (tiles in pass-2)")
-
-    # testing controls
-    p.add_argument("--one_tile", type=str, default=None, help="Only process this tile_id (subfolder name)")
-    p.add_argument("--one_tif", action="store_true", help="Within each selected tile, only process the first .tif")
-    args = p.parse_args()
-
-    # make available for any code that still checks this flag
-    global DEFER_TILE_AGG
-    DEFER_TILE_AGG = args.defer_tile_agg
-
-    # logging
-    smart_verbose = bool(args.one_tile and args.one_tif)
-    logging.basicConfig(
-        level=logging.DEBUG if smart_verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-        force=True
+def _agg_worker(task):
+    tile_id, output_tiles_dir, imagery_dir, id_version, verbose = task
+    return aggregate_tile_from_perfile_gpkgs(
+        tile_id=tile_id,
+        output_tiles_dir=output_tiles_dir,   # ROOT
+        imagery_dir=imagery_dir,
+        id_version=id_version,
+        verbose=verbose,
     )
 
-    logging.info("=== gt.py startup ===")
-    logging.info(f"Python: {sys.version.split()[0]} | SciPy fast-path: {'ON' if HAVE_SCIPY else 'OFF'}")
 
-    if not sanity_check_paths(args.master_dir, args.imagery_dir):
-        return
 
-    # ---------- discover all tiles ----------
-    all_tiles = [d for d in sorted(os.listdir(args.master_dir))
-                 if os.path.isdir(os.path.join(args.master_dir, d))]
 
-    tiles = all_tiles[:]
+#-------------</CODE ADDED for sub_tile aggregations>------------------------------------------------------
+def main():
+    import argparse, logging, os, sys, time
+    import multiprocessing as mp
+    from pathlib import Path
+
+    p = argparse.ArgumentParser("Step 2: Tile aggregation (from per-file GPKGs)")
+    p.add_argument("--config", required=True, help="Path to TOML config")
+    p.add_argument("--workers", type=int, default=None, help="Override workers (0=auto). If omitted, uses TOML.")
+    p.add_argument("--rank", type=int, default=1, help="1-based rank for round-robin partition")
+    p.add_argument("--world-size", type=int, default=1, help="Total ranks for round-robin partition")
+    p.add_argument("--tile-rank-st", type=int, default=None, help="1-based slice start (after partition)")
+    p.add_argument("--tile-rank-end", type=int, default=None, help="1-based slice end (after partition, inclusive)")
+    p.add_argument("--tifs-per-run", type=int, default=None, help="Cap total tiles aggregated this run (override TOML)")
+    p.add_argument("--one-tile", type=str, default=None, help="Only process this tile_id")
+    p.add_argument("--verbose", action="store_true")
+    args = p.parse_args()
+
+    cfg = load_toml(args.config)
+    apply_thread_env(cfg)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
+
+    output_tiles_dir = cfg_get(cfg, "io", "output_tiles_dir")
+    imagery_dir      = cfg_get(cfg, "cutlines", "root", default=None)  # where ArcticMosaic_{tile_id}_tiles.shp lives
+    if not output_tiles_dir:
+        raise ValueError("Need [io].output_tiles_dir in TOML")
+    if not imagery_dir:
+        raise ValueError("Need [cutlines].root in TOML (for ArcticMosaic_<tile_id>_tiles.shp)")
+
+    out_root = Path(output_tiles_dir)
+    if not out_root.is_dir():
+        raise ValueError(f"output_tiles_dir not found: {output_tiles_dir}")
+    if not Path(imagery_dir).is_dir():
+        raise ValueError(f"imagery_dir (cutlines.root) not found: {imagery_dir}")
+
+    id_version  = get_id_version(cfg)
+    target_epsg = get_target_epsg(cfg)  # should be 3338
+
+    n_workers_cfg = resolve_workers(cfg, "subtile", args.workers)
+    n_workers = finalize_workers(n_workers_cfg, cfg=cfg)
+
+    if args.verbose:
+        n_workers = 1  # ordered logs
+
+    logging.info(f"Step=tile | id_version={id_version} | target_epsg={target_epsg} | workers={n_workers}")
+
+    # ---------- discover tiles from output_tiles_dir ----------
+    tiles = sorted([p.name for p in out_root.iterdir() if p.is_dir()])
+
+    # optional single-tile override
+    if args.one_tile:
+        tiles = [t for t in tiles if t == args.one_tile]
 
     # ---------- rank/world partition (round-robin) ----------
-    rank = int(getattr(args, "rank", 1))
-    world = int(getattr(args, "world_size", 1))
-    world = max(world, 1)
-    rank0 = rank - 1  # 0-based
+    rank = max(1, int(args.rank or 1))
+    world = max(1, int(args.world_size or 1))
+    rank0 = rank - 1
     tiles = [t for i, t in enumerate(tiles) if (i % world) == rank0]
     logging.info(f"[rank {rank}/{world}] assigned {len(tiles)} tiles")
 
-    # ---------- optional manual slice override takes precedence ----------
-    st = getattr(args, "tile_rank_st", None)
-    en = getattr(args, "tile_rank_end", None)
+    # ---------- optional manual slice override ----------
+    st = args.tile_rank_st
+    en = args.tile_rank_end
     if (st is not None) or (en is not None):
         n = len(tiles)
         st = 1 if st is None else int(st)
@@ -774,52 +761,35 @@ def main():
         tiles = tiles[st_i:en_i] if st_i < en_i else []
         logging.info(f"[rank {rank}] slice override {st}-{en} → {len(tiles)} tiles")
 
-    # If user specified a single tile, honor it (kept as before)
-    if args.one_tile:
-        tiles = [t for t in tiles if t == args.one_tile]
+    # ---------- cap tiles per run (CLI > TOML > default) ----------
+    cap_per_run = (
+        int(args.tifs_per_run)
+        if args.tifs_per_run is not None
+        else int(cfg_get(cfg, "steps", "tile", "tifs_per_run", default=35) or 35)
+    )
+    tiles = tiles[:cap_per_run] if cap_per_run > 0 else tiles
+    logging.info(f"[capacity] tiles this run: {len(tiles)} (cap={cap_per_run if cap_per_run>0 else '∞'})")
 
-    # ---------- determine cap BEFORE building tasks ----------
-    cap_per_run = int(getattr(args, "tifs_per_run", 35))  # here: cap = max tiles to aggregate
-    remaining = cap_per_run if cap_per_run > 0 else float("inf")
-    logging.info(f"[capacity: {remaining}]")
-
-    tile_tasks = []
-    for tile_id in tiles:
-        logging.info(f"[checking {tile_id}] for per-file GPKGs")
-        if remaining <= 0:
-            break
-        # Only rank 1 prints verbose filter lines to avoid spam (kept; currently unused here)
-        verbose_here = (rank == 1)
-        # Each task is ONE tile to aggregate from its per-file GPKGs
-        tile_tasks.append((tile_id, args.output_tiles_dir, args.output_tiles_dir,args.imagery_dir, smart_verbose))
-        remaining -= 1
-
-    if not tile_tasks:
-        logging.error(f"[rank {rank}] No tiles queued; check paths/partition.")
+    if not tiles:
+        logging.info("No tiles queued.")
         return
 
-    cap_label = "∞" if cap_per_run <= 0 else str(cap_per_run)
-    logging.info(f"[rank {rank}] queued {len(tile_tasks)} tile(s) (cap={cap_label})")
-
-    total_mem_gb = psutil.virtual_memory().total / 1e9
-    cpu_cnt      = max(1, (os.cpu_count() or 1) - 1)
-    mem_based    = max(1, int(total_mem_gb // args.max_gb_per_worker))
-    auto_workers = min(cpu_cnt, mem_based, HARD_MAX_WORKERS)
-
+    # Use ordered logs when debugging a single tile
+    smart_verbose = bool(args.verbose and args.one_tile)
     if smart_verbose:
         n_workers = 1
-        logging.debug(f"[smart-verbose] forcing Workers=1 for ordered logs")
-    else:
-        n_workers = args.workers or auto_workers
 
-    logging.info(f"Tiles: {len(tile_tasks)} | Workers: {n_workers} | RAM {total_mem_gb:.1f} GB cap/worker {args.max_gb_per_worker} GB")
+    # Each task aggregates ONE tile folder: <output_tiles_dir>/<tile_id>/
+    tile_tasks = []
+    for tile_id in tiles:
+        tile_tasks.append((tile_id, output_tiles_dir, imagery_dir, id_version, args.verbose))
 
-    start = time.time()
+    t0 = time.time()
     per_tile_rows = []
 
     if n_workers == 1:
         for task in tile_tasks:
-            res = _agg_worker(task)  # unpack + call aggregator
+            res = _agg_worker(task)
             if res:
                 per_tile_rows.append(res)
     else:
@@ -828,21 +798,17 @@ def main():
                 if res:
                     per_tile_rows.append(res)
 
-    id_version = cfg_get(cfg, "project", "id_version")
-    build_master_gpkg(args.mosaic_gpkg, per_tile_rows, args.imagery_dir,id_version=id_version)
-
-    elapsed = time.time() - start
-    logging.info(f"Done in {elapsed/60:.1f} min | {elapsed/len(tile_tasks):.1f} s/tile")
-
+    dt = time.time() - t0
+    logging.info(f"Done: {len(per_tile_rows)}/{len(tile_tasks)} tiles aggregated in {dt/60:.1f} min")
+    # NOTE: Step 2 stops here. Global/mosaic build goes in Step 3.
 
 if __name__ == "__main__":
     try:
-        os.environ.setdefault("OGR_SQLITE_SYNCHRONOUS", "OFF")
-        os.environ.setdefault("OGR_SQLITE_CACHE", "200000")
         main()
     except Exception:
         logging.exception("Fatal error")
         sys.exit(1)
+
 
 """
 USAGE
@@ -865,5 +831,8 @@ python 2_create_subtile_sum_gt_gpkg_.py \
             --tile_rank_st 1 \
             --tile_rank_end 2 \
             --workers 1
+            
+python 2_create_subtile_sum_gt_gpkg_.py --config ./config.toml
+
 
 """
