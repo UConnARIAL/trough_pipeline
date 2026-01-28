@@ -46,7 +46,7 @@ Behavior:
 
 Key robustness:
 - Never calls read_masks(); validity is derived from nodata or assumed all-valid
-- Reads for boundary tiles are full-frame (like your pipeline) to avoid mask/overview sub-IFDs
+- Reads for boundary tiles are full-frame to avoid mask/overview sub-IFDs
 - Wraps all opens/reads in a SAFE GDAL env to avoid scanning .ovr/.msk and internal mask IFDs
 """
 

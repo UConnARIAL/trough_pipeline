@@ -18,10 +18,11 @@ omp_threads = 1
 
 [io]
 # These are common across steps
-model_mask_dir = "../TCN_refac_test_imgs/"             # dir that contains ML model outputs (detections)
-master_dir = "../TCN_refac_test_imgs/"                 # step1 reads from here clean masks from detected masks
-output_root = "../TCN_refac_test_gpkgs"                # all step outputs rooted here
-mosaic_gpkg = "../TCN_refac_test_gpkgs/global_summary.gpkg"
+model_mask_dir = "../TCN_refac_test_imgs/"   # dir that contains ML model outputs (raw detections bef any filtering)
+master_dir = "../TCN_refac_test_imgs/"       # cleaned inputs that step1 reads
+output_root = "../TCN_refac_test_gpkgs"      # GPKG outputs rooted read/write
+mosaic_gpkg = "../TCN_refac_test_gpkgs/global_summary.gpkg" #name/path of the final global summary gpkg
+ocean_mask_shp = "../ocean_mask_shp.shp"     # Ocean mask to be used to filter masks
 
 # Convenience subfolders (steps can override if needed)
 output_tiles_dir = "../TCN_refac_test_gpkgs"   # step1 writes per-file gpkg under tile_id/

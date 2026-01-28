@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
 """
+3_create_global sun_gt_gpkg.py
+
+is the stage specific logic after refactoring common code to gt_gpkg_common.py,
+
+This script does the global sumerization for the entire mosaic
+
+It can be executed for a range at tile level (sorted ranked order)
+
+It will NOT overite (NOT Idemptoent) the existing gpkgs if they exist.
+
+It will continue to append to the exsiting data and also aggegate values.
+
+Overall objective:
 Builds per-tile GeoPackages (components/edges/nodes + per-tile global_stats + XML)
 and a master GeoPackage (global_stats rows for all tiles, global_poly polygons + XML per tile),
 plus a whole-mosaic aggregation table global_stats_summary (1 row) with properly weighted averages.
@@ -9,7 +22,12 @@ Decisions:
   • global_poly attributes: store averages instead of raw counts for nodes/edges:
       - avg_graph_nodes_per_component = num_graph_nodes / num_components
       - avg_graph_edges_per_component = num_graph_edges / num_components
+
+Project: Permafrost Discovery Gateway: Mapping and Analysing Trough Capilary Networks
+PI      : Chandi Witharana
+Authors : Michael Pimenta, Amal Perera
 """
+
 #!/usr/bin/env python3
 import os
 import sys
@@ -50,7 +68,6 @@ def cfg_get(cfg: dict, *keys, default=None):
             return default
         cur = cur[k]
     return cur
-
 
 def cfg_get_step(cfg: dict, step: str, *keys, default=None):
     return cfg_get(cfg, "steps", step, *keys, default=default)
@@ -141,6 +158,14 @@ AGG_PATTERNS = [
     "*TCN_*summ*.gpkg",
 ]
 
+INT_FIELDS = {
+    "id", "num_components", "num_graph_nodes", "num_graph_edges",
+    "end_nodes_count", "junction_nodes_count", "num_edges",
+}
+FLOAT_FIELDS = {
+    "total_tcn_length_m", "largest_component_size_m", "average_component_size_m",
+    "average_node_degree", "mean_edge_length_m", "mean_edge_orientation_deg_stepweighted",
+}
 
 def find_tile_summary_gpkg(tile_dir: str, tile_id: str) -> Optional[str]:
     candidates: List[str] = []
@@ -178,17 +203,6 @@ def read_global_stats_row(gpkg_path: str) -> Optional[Dict]:
                 con.close()
             except Exception:
                 pass
-
-
-INT_FIELDS = {
-    "id", "num_components", "num_graph_nodes", "num_graph_edges",
-    "end_nodes_count", "junction_nodes_count", "num_edges",
-}
-FLOAT_FIELDS = {
-    "total_tcn_length_m", "largest_component_size_m", "average_component_size_m",
-    "average_node_degree", "mean_edge_length_m", "mean_edge_orientation_deg_stepweighted",
-}
-
 
 def coerce_types(tile_id: str, row: Dict) -> Dict:
     out = dict(row)
@@ -492,7 +506,7 @@ if __name__ == "__main__":
 
 
 """
-python gt_gpkg_tile_global_sum_w_sub.py --tiles_root /scratch2/projects/PDG_shared/TCN_gpkgs/  --imagery_dir /scratch2/projects/PDG_shared/AlaskaTundraMosaic/imagery       --mosaic_gpkg /scratch2/projects/PDG_shared/TCN_gpkgs/new_all_mosaic_w_sub_1_10.gpkg       --tile_rank_st 1 --tile_rank_end 10       --loglevel DEBUG
+python gt_gpkg_tile_global_sum_w_sub.py --tiles_root /scratch2/projects/PDG_shared/TCN_gpkgs/  --imagery_dir /scratch2/projects/PDG_shared/AlaskaTundraMosaic/imagery --mosaic_gpkg /scratch2/projects/PDG_shared/TCN_gpkgs/new_all_mosaic_w_sub_1_10.gpkg --tile_rank_st 1 --tile_rank_end 10       --loglevel DEBUG
 python 3_create_global_sum_gt_gpkg_.py --config config.toml
 """
 

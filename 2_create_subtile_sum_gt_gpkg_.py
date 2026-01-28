@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
 """
+2_create_resume_subtile_gt_gpkg.py
+
+is the stage specific logic after refactoring common code to gt_gpkg_common.py,
+
+This script does the sumerization of subtiles at the tile level,
+
+It can be executed for a range at tile level (sorted ranked order)
+
+It will overite the existing gpkgs if they exist.
+
+Overall objective:
 Builds per-tile GeoPackages (components/edges/nodes + per-tile global_stats + XML)
 and a master GeoPackage (global_stats rows for all tiles, global_poly polygons + XML per tile),
 plus a whole-mosaic aggregation table global_stats_summary (1 row) with properly weighted averages.
@@ -9,7 +20,14 @@ Decisions:
   • global_poly attributes: store averages instead of raw counts for nodes/edges:
       - avg_graph_nodes_per_component = num_graph_nodes / num_components
       - avg_graph_edges_per_component = num_graph_edges / num_components
+
+Project: Permafrost Discovery Gateway: Mapping and Analysing Trough Capilary Networks
+PI      : Chandi Witharana
+Authors : Michael Pimenta, Amal Perera
 """
+
+
+
 
 import os
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
