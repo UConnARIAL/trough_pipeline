@@ -150,6 +150,7 @@ def rasterize_water_full(ds, water_tile):
     )
 
 def collect_tifs(args):
+    print(args.tifs)
     paths = set()
     if args.tifs:
         for pat in args.tifs:
