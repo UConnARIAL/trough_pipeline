@@ -18,11 +18,12 @@ omp_threads = 1
 
 [io]
 # These are common across steps
-model_mask_dir = "../TCN_refac_test_imgs/"   # dir that contains ML model outputs (raw detections bef any filtering)
+model_mask_dir = "../TCN_refac_test_imgs_model/" # dir that contains ML model outputs (raw detections bef any filtering)
 master_dir = "../TCN_refac_test_imgs/"       # cleaned inputs that step1 reads
 output_root = "../TCN_refac_test_gpkgs"      # GPKG outputs rooted read/write
 mosaic_gpkg = "../TCN_refac_test_gpkgs/global_summary.gpkg" #name/path of the final global summary gpkg
-ocean_mask_shp = "../ocean_mask_shp.shp"     # Ocean mask to be used to filter masks
+ocean_mask_shp = "../water_3413_clip2.gpkg"     # Ocean mask to be used to filter masks
+ocean_mask_layer = "water_clip"
 
 # Convenience subfolders (steps can override if needed)
 output_tiles_dir = "../TCN_refac_test_gpkgs"   # step1 writes per-file gpkg under tile_id/
@@ -65,6 +66,24 @@ comps_length_field = "total_length_m"
 target_crs = "EPSG:3338"
 
 # ===================== Step 1: Subtile processing =====================
+[steps.mask_filter]
+enabled = true
+water_shp = "/path/water.gpkg"          # OR water_geojson
+ocean_threshold = 0.99
+buffer_m = 500.0
+simplify_m = 0.0
+max_workers = 0                        # 0=auto (like other steps)
+gdal_cache_mb = 128
+link_mode = "symlink"
+overwrite_existing = false
+include_dropped = false
+absolute_symlinks = false
+out_csv = "ocean_filter.csv"
+out_drop = "drop_tiles.txt"
+out_boundary = "boundary_tiles.txt"
+log_every = 50
+
+
 [steps.subtile]
 enabled = true
 tifs_per_run = 35
