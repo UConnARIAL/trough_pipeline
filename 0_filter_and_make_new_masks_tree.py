@@ -15,6 +15,7 @@ Note it will only put a symlink to files that are the same after the filtering.
   * boundary_tiles.txt (tiles rewritten & to be reprocessed)
 
 Requires: numpy, rasterio, shapely, pyproj, GDAL (for OGR path).
+data required : filter shape file
 
 Usage
 -----
