@@ -297,10 +297,11 @@ if __name__ == "__main__":
     main()
 
 """
+USAGE
 python check_gpkgs_crs.py --root /scratch2/projects/PDG_shared/AK_TCN_gpkgs --sample /scratch2/projects/PDG_shared/AK_TCN_gpkgs/46_20/46_20_TCN_summary.gpkg
 python check_gpkgs_crs.py --root /scratch2/projects/PDG_shared/AK_TCN_gpkgs --sample /scratch2/projects/PDG_shared/AK_TCN_gpkgs/43_17/ArcticMosaic_43_17_1_1_TCN.gpkg
 
-
+SQL commands to view
 sqlite3 /scratch2/projects/PDG_shared/AK_TCN_gpkgs/49_19/ArcticMosaic_49_19_5_4_TCN.gpkg "SELECT table_name,data_type,srs_id FROM gpkg_contents ORDER BY data_type,table_name;"
 
 sqlite3 /scratch2/projects/PDG_shared/AK_TCN_gpkgs/49_19/ArcticMosaic_49_19_5_4_TCN.gpkg "SELECT table_name,srs_id FROM gpkg_geometry_columns ORDER BY table_name;"
