@@ -196,9 +196,9 @@ def write_per_file_gpkg(
                 logging.warning(f"Could not remove {p}: {e}")
 
     layers = cfg_get(cfg, "layers", default={}) or {}
-    nodes_layer = layers.get("nodes", "GraphTheoraticNodes")
-    edges_layer = layers.get("edges", "GraphTheoraticEdges")
-    comps_layer = layers.get("components", "GraphTheoraticComponents")
+    nodes_layer = layers.get("nodes", "GraphTheoreticNodes")
+    edges_layer = layers.get("edges", "GraphTheoreticEdges")
+    comps_layer = layers.get("components", "GraphTheoreticComponents")
 
     nodes_gdf = _records_to_gdf(nodes_records_f, crs_wkt)
     edges_gdf = _records_to_gdf(edges_records_f, crs_wkt)

@@ -121,7 +121,7 @@ def _write_per_file_gpkg(tile_dir, tif_path, crs_wkt,
         return
 
     written = False
-    for layer_name, gdf in (("GraphTheoraticNodes", nodes_gdf), ("GraphTheoraticEdges", edges_gdf), ("GraphTheoraticComponents", comps_gdf)):
+    for layer_name, gdf in (("GraphTheoreticNodes", nodes_gdf), ("GraphTheoreticEdges", edges_gdf), ("GraphTheoreticComponents", comps_gdf)):
         if gdf is None or gdf.empty:
             continue
         gdf.to_file(out_gpkg, layer=layer_name, driver="GPKG", mode=("w" if not written else "a"))
@@ -143,7 +143,7 @@ def _write_per_file_gpkg(tile_dir, tif_path, crs_wkt,
                 NEW_LAYER_NAMES[i] if (i < len(NEW_LAYER_NAMES)) else src_layer
             )
             # avoid clobbering core layer names
-            if dst_layer in {"GraphTheoraticNodes", "GraphTheoraticEdges", "GraphTheoraticComponents"}:
+            if dst_layer in {"GraphTheoreticNodes", "GraphTheoreticEdges", "GraphTheoreticComponents"}:
                 dst_layer = f"ext_{dst_layer}"
             old_gpkg_path = AL.tiff_to_gpkg_path(tif_path)
             logging.debug(f"OLD GPKG {old_gpkg_path}")
@@ -391,9 +391,9 @@ def aggregate_tile_from_perfile_gpkgs(
 
     Enforces EPSG:3338 on all vector layers before computing areas/coverage and before writing.
     Writes:
-      - GraphTheoraticEdges
-      - GraphTheoraticNodes
-      - GraphTheoraticComponents
+      - GraphTheoreticEdges
+      - GraphTheoreticNodes
+      - GraphTheoreticComponents
       - SubTileStats (polygons + per-subtile metrics)
       - global_stats (sqlite table) + XML metadata
     """
@@ -448,27 +448,27 @@ def aggregate_tile_from_perfile_gpkgs(
 
             e_gdf = n_gdf = c_gdf = None
 
-            if "GraphTheoraticEdges" in layers:
+            if "GraphTheoreticEdges" in layers:
                 try:
-                    e_gdf = gpd.read_file(gpkg, layer="GraphTheoraticEdges")
+                    e_gdf = gpd.read_file(gpkg, layer="GraphTheoreticEdges")
                     e_gdf = _to_target_crs(e_gdf, target_epsg, f"edges {os.path.basename(gpkg)}")
                     if e_gdf is not None and not e_gdf.empty:
                         edges_parts.append(e_gdf)
                 except Exception as e:
                     logging.warning("[%s] edges read fail (%s): %s", tile_id, os.path.basename(gpkg), e)
 
-            if "GraphTheoraticNodes" in layers:
+            if "GraphTheoreticNodes" in layers:
                 try:
-                    n_gdf = gpd.read_file(gpkg, layer="GraphTheoraticNodes")
+                    n_gdf = gpd.read_file(gpkg, layer="GraphTheoreticNodes")
                     n_gdf = _to_target_crs(n_gdf, target_epsg, f"nodes {os.path.basename(gpkg)}")
                     if n_gdf is not None and not n_gdf.empty:
                         nodes_parts.append(n_gdf)
                 except Exception as e:
                     logging.warning("[%s] nodes read fail (%s): %s", tile_id, os.path.basename(gpkg), e)
 
-            if "GraphTheoraticComponents" in layers:
+            if "GraphTheoreticComponents" in layers:
                 try:
-                    c_gdf = gpd.read_file(gpkg, layer="GraphTheoraticComponents")
+                    c_gdf = gpd.read_file(gpkg, layer="GraphTheoreticComponents")
                     c_gdf = _to_target_crs(c_gdf, target_epsg, f"comps {os.path.basename(gpkg)}")
                     if c_gdf is not None and not c_gdf.empty:
                         comps_parts.append(c_gdf)
@@ -640,9 +640,9 @@ def aggregate_tile_from_perfile_gpkgs(
         gdf.to_file(gpkg_path, layer=layer, driver="GPKG", mode=mode)
 
     with StageTimer(verbose, f"[{tile_id}]", "WRITE layers"):
-        _write_layer(edges_all, "GraphTheoraticEdges")
-        _write_layer(nodes_all, "GraphTheoraticNodes")
-        _write_layer(comps_all, "GraphTheoraticComponents")
+        _write_layer(edges_all, "GraphTheoreticEdges")
+        _write_layer(nodes_all, "GraphTheoreticNodes")
+        _write_layer(comps_all, "GraphTheoreticComponents")
 
         if sub_rows:
             st_df = pd.DataFrame(sub_rows)

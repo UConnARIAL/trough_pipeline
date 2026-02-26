@@ -375,7 +375,7 @@ def _expected_gpkg_name_for_tif(tif_path: str, gpkg_suffix: str = "_TCN.gpkg") -
 
 def is_gpkg_complete_by_tail(
     gpkg_path: str,
-    layer: str = "GraphTheoraticComponents",
+    layer: str = "GraphTheoreticComponents",
     required_fields: tuple[str, str] = ("norm_input_exp", "input_exp_cnt"),
     require_nonnull: bool = True,
     min_nonnull: int = 1,
