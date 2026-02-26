@@ -2,6 +2,8 @@
 """
 check_tile_tcn_gpkg_layers_crs.py
 
+helper util to check crs is valid
+
 Checks GeoPackages under:
   <root>/<tile_dir>/<pattern>   (default pattern: *_TCN.gpkg)
 
