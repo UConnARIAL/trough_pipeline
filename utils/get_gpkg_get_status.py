@@ -15,8 +15,7 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from gt_gpkg_tile_resume_check_sub3 import filter_done_tiffs
-
+from gt_gpkg_common import filter_done_tiffs
 
 def discover_tiles(master_dir: str):
     return [e.name for e in os.scandir(master_dir) if e.is_dir()]
