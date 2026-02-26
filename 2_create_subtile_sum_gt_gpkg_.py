@@ -174,9 +174,9 @@ def _write_per_file_gpkg(tile_dir, tif_path, crs_wkt,
         date_field="ACQDATE",  # your field
         mean_month=7, mean_day=15,  # the “mean date” (e.g., July 15)
         sigma_days=45, # spread of the Gaussian in days
-        nodes_layer="GraphTheoraticNodes",
-        edges_layer="GraphTheoraticEdges",
-        comps_layer="GraphTheoraticComponents",
+        nodes_layer="GraphTheoreticNodes",
+        edges_layer="GraphTheoreticEdges",
+        comps_layer="GraphTheoreticComponents",
         edges_length_field="length_m",
         comps_length_field="total_length_m",
         target_crs="EPSG:3338"  # keep everything in your package CRS
