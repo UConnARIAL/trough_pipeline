@@ -47,7 +47,7 @@ def create_slurm_script(sub_dir, output_dir, job_name, script_dir):
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -t 16:00:00
-#SBATCH -A DPP20001
+#SBATCH -A 
 
 source /home1/09208/asperera/.bashrc
 conda activate /scratch1/projects/PDG_shared/Troughs_Segformer/segformer-env-org
