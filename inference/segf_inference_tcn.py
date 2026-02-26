@@ -67,10 +67,10 @@ from contextlib import contextmanager
 MODEL_PATH = Path(__file__).resolve().parent / "segformer_finetuned.pth"
 
 # Put your release URL here (recommended: GitHub Releases asset)
-MODEL_URL = "https://github.com/UConnARIAL/trough_pipeline/releases/latest/download/segformer_finetuned.pth"
+MODEL_URL = "https://github.com/UConnARIAL/trough_pipeline/releases/latest/download/segf-mit-b3_tcn_finetuned.pth"
 
 # Optional but recommended: pin integrity. If you don’t want this yet, set to None.
-MODEL_SHA256 = "19ef74970bda01fabf8bda7e42356b0131628dd009688527650890eafd919534"  # SHA-256 (hex) for "segformeralaskatundratcn"
+MODEL_SHA256 = "bb92f7471d2a3a145f45509bffe177e5c016a22154cebd11e0eba07602d5510b"  # SHA-256 (hex) for "segf-mit-b3_tcn_finetuned.pth"
 
 @contextmanager
 def _file_lock(lock_path: Path, poll_s: float = 0.25):
