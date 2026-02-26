@@ -63,13 +63,13 @@ import urllib.request
 from pathlib import Path
 from contextlib import contextmanager
 
-# --- hard-coded defaults live in inference only ---
-MODEL_PATH = Path(__file__).resolve().parent / "segformer_finetuned.pth"
+# --- some hard-coded defaults live in inference only ---
+MODEL_PATH = Path(__file__).resolve().parent / "segf-mit-b3_tcn_finetuned.pth"
 
-# Put your release URL here (recommended: GitHub Releases asset)
-MODEL_URL = "https://github.com/UConnARIAL/trough_pipeline/releases/latest/download/segf-mit-b3_tcn_finetuned.pth"
+# Release URL from PGC google drive
+MODEL_URL = "https://drive.google.com/file/d/1pI8n9PZYPzWXm5h1kpnn2XPKdv_DYoeb/view?usp=sharing"
 
-# Optional but recommended: pin integrity. If you don’t want this yet, set to None.
+# Model integrity check
 MODEL_SHA256 = "bb92f7471d2a3a145f45509bffe177e5c016a22154cebd11e0eba07602d5510b"  # SHA-256 (hex) for "segf-mit-b3_tcn_finetuned.pth"
 
 @contextmanager
