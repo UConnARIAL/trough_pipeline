@@ -8,7 +8,7 @@
 #SBATCH -t 8:00:00
 #SBATCH -o ag1x_%j.out
 #SBATCH -e sg1x_%j.err
-#SBATCH -A TG-NAIRR240088
+#SBATCH -A 
 
 set -euo pipefail
 
