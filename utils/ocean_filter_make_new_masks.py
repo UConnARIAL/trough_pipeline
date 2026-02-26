@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+Stand alone version of the ocean filtering already included in the refactored pipeline. can be removed of not needed
+
 Ocean filter from NSIDC water polygons (no Fiona).
 
 - Reads water polygons via GDAL/OGR (osgeo.ogr) OR from GeoJSON (stdlib json).
