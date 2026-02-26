@@ -31,9 +31,9 @@ tile_out_dir    = "./outputs/tiles"      # step2 could write per-tile gpkg
 global_out_dir  = "./outputs/global"     # step3 could write global gpkg / reports
 
 [layers]
-nodes      = "GraphTheoraticNodes"
-edges      = "GraphTheoraticEdges"
-components = "GraphTheoraticComponents"
+nodes      = "GraphTheoreticNodes"
+edges      = "GraphTheoreticEdges"
+components = "GraphTheoreticComponents"
 cutlines   = "InputMosaicCutlinesVector"
 
 [cutlines]
