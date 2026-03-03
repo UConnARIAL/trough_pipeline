@@ -167,8 +167,29 @@ def ensure_model_weights(
 # -----------------------
 # Helper Functions
 # -----------------------
+def resample_raster(src_raster, target_res, indexes=None):
+    transform, width, height = calculate_default_transform(
+        src_raster.crs, src_raster.crs, src_raster.width, src_raster.height,
+        *src_raster.bounds, resolution=target_res
+    )
+    kwargs = src_raster.meta.copy()
+    kwargs.update({'transform': transform, 'width': width, 'height': height})
 
-def resample_raster(src_raster, target_res):
+    if indexes is None:
+        data = src_raster.read(
+            out_shape=(src_raster.count, height, width),
+            resampling=Resampling.bilinear
+        )
+    else:
+        # rasterio bands are 1-based
+        data = src_raster.read(
+            indexes=indexes,
+            out_shape=(len(indexes), height, width),
+            resampling=Resampling.bilinear
+        )
+    return data, kwargs
+
+def resample_raster_non_indexed(src_raster, target_res):
     transform, width, height = calculate_default_transform(
         src_raster.crs, src_raster.crs, src_raster.width, src_raster.height,
         *src_raster.bounds, resolution=target_res
@@ -212,8 +233,10 @@ def custom_collate(batch):
 def infer_tif(input_path, output_path, model, batch_size=BATCH_SIZE):
     with rasterio.open(input_path) as src:
         # Resample to target resolution and select only bands 8, 6, and 1.
-        img_resampled, profile = resample_raster(src, TARGET_RES)
-        img_selected = img_resampled[[7, 5, 0], :, :]
+        #img_resampled, profile = resample_raster(src, TARGET_RES)
+        #img_selected = img_resampled[[7, 5, 0], :, :] Done to reduce mem usage
+        # Resample only bands 8, 6, 1 (1-based indexing in rasterio)
+        img_selected, profile = resample_raster(src, TARGET_RES, indexes=[8, 6, 1])
         # Create a null mask: pixels where all selected bands equal NULL_VALUE.
         null_mask = (img_selected == NULL_VALUE).all(axis=0)
         # Get original dimensions.

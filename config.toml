@@ -18,10 +18,11 @@ omp_threads = 1
 
 [io]
 # These are common across steps
-input_img_dir = "/scratch2/projects/PDG_shared/CanadaTundraMosaic/"
+# make them all absolute paths relative used for testing/git upload.....
+input_img_dir = "/scratch2/projects/PDG_shared/CanadaTundraMosaic/" # dir that contains orignal img sub dirs(tiles)
 model_mask_dir = "../TCN_refac_test_imgs_model/" # dir that contains ML model outputs (raw detections bef any filtering)
-master_dir = "../TCN_refac_test_imgs/"       # cleaned inputs that step1 reads
-output_root = "../TCN_refac_test_gpkgs"      # GPKG outputs rooted read/write
+master_dir = "./TCN_refac_test_imgs/"            # cleaned inputs that step 1 reads
+output_root = "../TCN_refac_test_gpkgs"          # GPKG outputs rooted read/write
 mosaic_gpkg = "../TCN_refac_test_gpkgs/global_summary.gpkg" #name/path of the final global summary gpkg
 ocean_mask_shp = "../water_3413_clip2.gpkg"     # Ocean mask to be used to filter masks
 ocean_mask_layer = "water_clip"
