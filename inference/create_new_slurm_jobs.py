@@ -131,6 +131,7 @@ def resolve_io(args):
         raise SystemExit("Missing required IO: " + ", ".join(missing))
 
     return input_dir, output_dir
+
 if __name__ == "__main__":
     args = parse_args()
     input_dir, output_dir = resolve_io(args)

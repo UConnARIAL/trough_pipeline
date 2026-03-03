@@ -33,6 +33,13 @@ from tqdm import tqdm
 from skimage import exposure
 from torch.utils.data import Dataset, DataLoader
 import argparse
+import time
+import hashlib
+import logging
+import tempfile
+import urllib.request
+from pathlib import Path
+from contextlib import contextmanager
 
 
 # -----------------------
@@ -47,29 +54,24 @@ TARGET_RES = 0.5   # 0.5-meter resolution
 NULL_VALUE = 0
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# Use a small batch size to reduce peak memory usage based on architecture avaialble.
+# Use a small batch size to reduce peak memory usage based on architecture available.
 BATCH_SIZE = 1
 
 INPUT_FOLDER = "./input"
 OUTPUT_FOLDER = "./output"
 
-#--------------------Helpers to get model---------------
-import os
-import time
-import hashlib
-import logging
-import tempfile
-import urllib.request
-from pathlib import Path
-from contextlib import contextmanager
+# -----------------------
+# Model weights pull/helpers
+# -----------------------
 
-# --- some hard-coded defaults live in inference only ---
+# --- some hard-coded defaults intentionally live in inference only ---
 MODEL_PATH = Path(__file__).resolve().parent / "segf_mit_b3_tcn_finetuned.pth"
-
 # Release URL from PGC google drive
 # MODEL_URL = "https://drive.google.com/uc?export=download&id=1pI8n9PZYPzWXm5h1kpnn2XPKdv_DYoeb" # Goolge drive location
 # Google drive does not download due the expected user input step when downloading large files.
 # Can use the thsi link to manualy download the weight file if the via jit release doe not work
+
+# MODEL WEIGHT FILE from github / release
 MODEL_URL = "https://github.com/UConnARIAL/trough_pipeline/releases/download/tcn-segf-weights-1.0.0/segf_mit-b3_tcn_finetuned.pth"
 
 # Model integrity check
@@ -161,7 +163,7 @@ def ensure_model_weights(
             except Exception:
                 pass
 
-#--------------------</Helpers to get model>---------------
+#--------------------</Helpers to get model weight file>---------------
 # -----------------------
 # Helper Functions
 # -----------------------
@@ -228,9 +230,10 @@ def infer_tif(input_path, output_path, model, batch_size=BATCH_SIZE):
     #counts = np.memmap("temp_counts.dat", dtype=np.uint16, mode="w+", shape=(orig_h, orig_w))
 
     # Instead of large in‑memory arrays, create memmaps for predictions on the local storage
+    pid = os.getpid()
     temp_dir = os.getenv("SLURM_TMPDIR", "/tmp")  # Use node-local storage if available
-    sum_preds_path = os.path.join(temp_dir, "temp_sum_preds.dat")
-    counts_path = os.path.join(temp_dir, "temp_counts.dat")
+    sum_preds_path = os.path.join(temp_dir, f"temp_sum_preds{pid}.dat")
+    counts_path = os.path.join(temp_dir, f"temp_counts{pid}.dat")
 
     sum_preds = np.memmap(sum_preds_path, dtype=np.float32, mode="w+", shape=(orig_h, orig_w))
     counts = np.memmap(counts_path, dtype=np.uint16, mode="w+", shape=(orig_h, orig_w))

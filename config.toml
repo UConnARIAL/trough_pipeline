@@ -18,6 +18,7 @@ omp_threads = 1
 
 [io]
 # These are common across steps
+input_img_dir = "/scratch2/projects/PDG_shared/CanadaTundraMosaic/"
 model_mask_dir = "../TCN_refac_test_imgs_model/" # dir that contains ML model outputs (raw detections bef any filtering)
 master_dir = "../TCN_refac_test_imgs/"       # cleaned inputs that step1 reads
 output_root = "../TCN_refac_test_gpkgs"      # GPKG outputs rooted read/write
