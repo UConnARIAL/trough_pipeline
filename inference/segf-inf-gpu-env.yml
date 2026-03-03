@@ -1,0 +1,24 @@
+name: segf-inf-gpu-env
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+
+  # job creator config
+  - toml
+
+  # inference imports
+  - numpy
+  - rasterio
+  - scikit-image
+  - tqdm
+  - transformers
+
+  # GPU torch stack (matches cu118)
+  - pytorch=2.5.*
+  - torchvision=0.20.*
+  - torchaudio=2.5.*
+  - pytorch-cuda=11.8

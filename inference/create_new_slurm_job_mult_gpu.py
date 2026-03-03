@@ -88,11 +88,6 @@ echo "Done: $IN_DIR -> $OUT_DIR"
         f.write(script_content)
     return script_path
 
-
-
-
-
-
 def main(input_dir, output_dir, script_dir, st, end, run_job):
     sub_dirs = sorted([d for d in os.listdir(input_dir) if os.path.isdir(os.path.join(input_dir, d))])
     for i, sub_dir in enumerate(sub_dirs, start=0):
