@@ -49,8 +49,8 @@ def create_slurm_script(sub_dir, output_dir, job_name, script_dir):
 #SBATCH -t 16:00:00
 #SBATCH -A 
 
-source /home1/09208/asperera/.bashrc
-conda activate /scratch1/projects/PDG_shared/Troughs_Segformer/segformer-env-org
+source ~/.bashrc
+conda activate /scratch2/projects/PDG_shared/CONDA_ENV/segformer-env-gpkg3
 
 CUDA_VISIBLE_DEVICES=0,1,2,3
 # Run the distributed inference script

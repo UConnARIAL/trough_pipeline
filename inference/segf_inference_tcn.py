@@ -64,10 +64,13 @@ from pathlib import Path
 from contextlib import contextmanager
 
 # --- some hard-coded defaults live in inference only ---
-MODEL_PATH = Path(__file__).resolve().parent / "segf-mit-b3_tcn_finetuned.pth"
+MODEL_PATH = Path(__file__).resolve().parent / "segf_mit_b3_tcn_finetuned.pth"
 
 # Release URL from PGC google drive
-MODEL_URL = "https://drive.google.com/file/d/1pI8n9PZYPzWXm5h1kpnn2XPKdv_DYoeb/view?usp=sharing"
+# MODEL_URL = "https://drive.google.com/uc?export=download&id=1pI8n9PZYPzWXm5h1kpnn2XPKdv_DYoeb" # Goolge drive location
+# Google drive does not download due the expected user input step when downloading large files.
+# Can use the thsi link to manualy download the weight file if the via jit release doe not work
+MODEL_URL = "https://github.com/UConnARIAL/trough_pipeline/releases/download/tcn-segf-weights-1.0.0/segf_mit-b3_tcn_finetuned.pth"
 
 # Model integrity check
 MODEL_SHA256 = "bb92f7471d2a3a145f45509bffe177e5c016a22154cebd11e0eba07602d5510b"  # SHA-256 (hex) for "segf-mit-b3_tcn_finetuned.pth"
@@ -319,6 +322,7 @@ def infer_tif(input_path, output_path, model, batch_size=BATCH_SIZE):
 
 def load_model():
     model = SegformerForSemanticSegmentation.from_pretrained(f'nvidia/{ENCODER}', num_labels=1)
+    ensure_model_weights()  # uses hard-coded MODEL_PATH + MODEL_URL
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
     model.to(DEVICE)
     model.eval()
