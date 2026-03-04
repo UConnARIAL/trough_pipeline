@@ -33,6 +33,17 @@ Run the inference pipline and then run each of the steps 0..3 generate gpkgs
 2. subtile summeries
 3. global summary
 
+### AK TCN data procesing aprox. costs*
+
+|  | images | masks | gpkgs |
+|-----:|------:|------:|------:|
+| Total Size | 46T | 49G | 2.2T |
+| Comp Cost in SU's | | ~3000 | ~48,000 |  
+| TACC Frontera queue | | RTX (gpu) | NVDIMM (cpu) |  
+
+*Above does not include the model training cost
+
+
 ### TCN design options that were considered / compared 
 Attempts to build big data pipeline for troughs on NSF HPC's
 
