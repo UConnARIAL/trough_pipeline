@@ -33,13 +33,13 @@ Run the inference pipline and then run each of the steps 0..3 generate gpkgs
 2. subtile summeries
 3. global summary
 
-### AK TCN data procesing aprox. costs*
+### AK TCN data [1] procesing aprox. costs*
 
 |  | images | masks | gpkgs |
 |-----:|------:|------:|------:|
 | Total Size | 46T | 49G | 2.2T |
 | Comp Cost in SU's | | ~3000 | ~48,000 |  
-| TACC Frontera queue | | RTX (gpu) | NVDIMM (cpu) |  
+| TACC Frontera queue[2] | | RTX (gpu) | NVDIMM (cpu) |  
 
 *Above does not include the model training cost
 
@@ -53,5 +53,9 @@ Two options for patching and stiching:
 
 2.use newer rasterio / torchgeo / raster vision frameworks to mange the patching / stiching 
 ![image](https://github.com/user-attachments/assets/9b334f60-ea0e-4fd4-b80a-157f0db6dde3)
+
+[1] Michael Pimenta, Chandi Witharana, Amal Perera, Anna Liljedahl, & Elias Manos. (2026). Pan-Alaskan permafrost tundra capillary network detection and graph theoretic analysis from <1 meter resolution satellite imagery (2011 - 2025). Arctic Data Center. doi:10.18739/A24Q7QS3R.
+
+[2] D. Stanzione, J. West, R. T. Evans, T. Minyard, O. Ghattas, and D. K. Panda, “Frontera: The Evolution of Leadership Computing at the National Science Foundation,” in Practice and Experience in Advanced Research Computing, in PEARC ’20. New York, NY, USA: Association for Computing Machinery, Jul. 2020, pp. 106–111. doi: 10.1145/3311790.3396656.
 
 
