@@ -1,7 +1,5 @@
 from pathlib import Path
 
-
-
 import numpy as np
 import rasterio
 from rasterio.enums import ColorInterp
