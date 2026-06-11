@@ -18,6 +18,11 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from transformers import SegformerForSemanticSegmentation
 
+# Headless-safe settings for HPC/SLURM compute nodes.
+# Prevent matplotlib/OpenCV/Qt from trying to open a GUI display.
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 
 class SegmentationDataset(Dataset):
     def __init__(self, image_dir, mask_dir, transform=None):
@@ -76,7 +81,7 @@ class SegmentationDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx):
+    def __getitem__OLD(self, idx):
         image_path, mask_path = self.samples[idx]
 
         with rasterio.open(image_path) as image_src:
@@ -106,6 +111,53 @@ class SegmentationDataset(Dataset):
 
         return image, mask
 
+    def __getitem__(self, idx):
+        image_path, mask_path = self.samples[idx]
+
+        with rasterio.open(image_path) as image_src:
+            if image_src.count >= 3:
+                # Read first three bands as RGB/pseudo-RGB.
+                # rasterio gives shape: (bands, H, W)
+                image = image_src.read([1, 2, 3]).astype(np.float32)
+
+                # Convert to shape expected by albumentations:
+                # (bands, H, W) -> (H, W, bands)
+                image = np.transpose(image, (1, 2, 0))
+
+            else:
+                # Fall back to single-band input and repeat to 3 channels,
+                # because the pretrained MiT backbone expects 3-channel input.
+                image = image_src.read(1).astype(np.float32)
+                image = np.repeat(image[..., None], repeats=3, axis=2)
+
+
+        with rasterio.open(mask_path) as mask_src:
+            mask = mask_src.read(1).astype(np.int64)
+
+        # Allow common binary mask encodings:
+        #   0/1   -> already class labels
+        #   0/255 -> convert foreground to class label 1
+        valid_mask_values = np.isin(mask, [0, 1, 255])
+
+        if not valid_mask_values.all():
+            invalid_values = np.unique(mask[~valid_mask_values])
+
+            raise ValueError(
+                f"Mask contains values other than 0, 1, and 255: {mask_path}. "
+                f"Invalid values: {invalid_values[:10]}"
+            )
+
+        # Convert binary mask to class labels expected by training:
+        #   background = 0
+        #   TCN        = 1
+        mask = (mask > 0).astype(np.int64)
+
+        if self.transform:
+            augmented = self.transform(image=image, mask=mask)
+            image = augmented["image"]
+            mask = augmented["mask"]
+
+        return image, mask
 
 def calculate_confusion_counts(predictions, targets):
     preds = torch.argmax(predictions, dim=1)
@@ -622,3 +674,21 @@ if __name__ == "__main__":
         args=(args,),
         nprocs=args.world_size,
     )
+
+
+"""
+USAGE
+python segformer_train.py \
+  --model_size mit-b3 \
+  --chip_size 1024 \
+  --train_path /scratch2/projects/PDG_shared/TCN_Training/tcn_mxr/train_1024/images \
+  --train_mask_path /scratch2/projects/PDG_shared/TCN_Training/tcn_mxr/train_1024/masks \
+  --val_path /scratch2/projects/PDG_shared/TCN_Training/tcn_mxr/val_1024/images \
+  --val_mask_path /scratch2/projects/PDG_shared/TCN_Training/tcn_mxr/val_1024/masks \
+  --batch_size 1 \
+  --epochs 20 \
+  --lr 1e-4 \
+  --dist_url tcp://127.0.0.1:29500 \
+  --world_size 4 \
+  --base_output_dir ./outputs/segformer_tcn_mitb3_1024
+"""

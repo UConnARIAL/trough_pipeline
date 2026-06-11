@@ -49,8 +49,8 @@ from contextlib import contextmanager
 ENCODER = "mit-b3"
 CHIP_SIZE = 1024
 OVERLAP = 128
-THRESHOLD = 0.01
-TARGET_RES = 0.5   # 0.5-meter resolution
+THRESHOLD = 0.005 # 0.01
+TARGET_RES = 0.75   # 0.5-meter resolution
 NULL_VALUE = 0
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -236,7 +236,9 @@ def infer_tif(input_path, output_path, model, batch_size=BATCH_SIZE):
         #img_resampled, profile = resample_raster(src, TARGET_RES)
         #img_selected = img_resampled[[7, 5, 0], :, :] Done to reduce mem usage
         # Resample only bands 8, 6, 1 (1-based indexing in rasterio)
-        img_selected, profile = resample_raster(src, TARGET_RES, indexes=[8, 6, 1])
+        indexes = [8, 6, 1] if src.count >= 8 else [3, 2, 1]
+        img_selected, profile = resample_raster(src, TARGET_RES, indexes=indexes)
+        #img_selected, profile = resample_raster(src, TARGET_RES, indexes=[8, 6, 1])
         # Create a null mask: pixels where all selected bands equal NULL_VALUE.
         null_mask = (img_selected == NULL_VALUE).all(axis=0)
         # Get original dimensions.
@@ -382,3 +384,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+USAGE
+python segf_inference_tcn.py --input_dir=/work/09208/asperera/ls6/DATA/historical/geotifs/ \
+    --output_dir=/work/09208/asperera/ls6/DATA/historical/tcn
+
+"""
