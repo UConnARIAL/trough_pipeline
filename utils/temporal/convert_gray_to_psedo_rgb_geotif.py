@@ -6,6 +6,7 @@ from rasterio.enums import ColorInterp
 from skimage import exposure
 from skimage.filters import sobel
 
+
 def scale_to_uint8_percentile(
     arr,
     valid_mask,
