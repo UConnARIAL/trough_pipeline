@@ -50,6 +50,8 @@ cd globusconnectpersonal-*
 
 During setup:
 
+* You will be asked to login to Globus via a given URL, and a code will be generated on the browser that you need to copy and past to proceed with the setup 
+
 * choose a clear endpoint name such as:
 
 ```text
