@@ -62,11 +62,15 @@ presto-pilot-gcp-vm
 
 ## 4. Start Globus Connect Personal
 
+For an initial test, you can start it in the background with:
+
 ```bash
 ./globusconnectpersonal -start &
 ```
 
-This starts the service in the background.
+This is fine for a quick manual test. However, for a more reliable setup that survives logout, terminal closure, and reboot, the recommended approach is the **user systemd service** described later in this guide.
+
+If you want a temporary session-based alternative, you could also run it inside `tmux`, but `systemd --user` is the better long-term option.
 
 ---
 
@@ -85,7 +89,7 @@ A healthy setup should show that Globus is connected.
 Create the destination directory:
 
 ```bash
-mkdir -p ~/masks_in
+mkdir -p /mnt/data/masks_in
 ```
 
 Edit the allowed path configuration so Globus exposes only that folder:
@@ -146,7 +150,9 @@ This keeps transferred data separate from code, configs, and other home-director
 
 ---
 
-## 9. Configure auto-start after reboot
+## 9. Configure reliable background start and auto-start after reboot
+
+The most reliable way to keep Globus Connect Personal running even if your terminal closes is to run it as a **systemd user service**. This is preferable to leaving it attached to a shell, and generally better than using `tmux` for a long-term setup.
 
 Move the extracted directory to a fixed location:
 
@@ -214,6 +220,8 @@ systemctl --user status globusconnectpersonal
 * For a shared or more permanent multi-user system, consider **Globus Connect Server** instead.
 * Restricting `config-paths` to a specific folder is recommended rather than exposing the full home directory.
 * For large transfers, keep the destination folder dedicated and organized.
+* Starting Globus Connect Personal with `&` is acceptable for testing, but it is not the best long-term approach if you want the service to survive logout and reboot.
+* `tmux` can be used as a temporary workaround to keep a shell session alive, but a **systemd user service** is the recommended persistent solution.
 
 ---
 
@@ -248,7 +256,7 @@ tar xzf globusconnectpersonal-latest.tgz
 cd globusconnectpersonal-*
 ./globusconnectpersonal -setup
 ./globusconnectpersonal -start &
-mkdir -p ~/masks_in
+mkdir -p /mnt/data/masks_in
 printf "%s\n" "/mnt/data/masks_in,0,1" > ~/.globusonline/lta/config-paths
 ./globusconnectpersonal -stop
 ./globusconnectpersonal -start &
@@ -269,3 +277,4 @@ systemctl --user enable globusconnectpersonal
 systemctl --user status globusconnectpersonal
 sudo loginctl enable-linger $USER
 ```
+
