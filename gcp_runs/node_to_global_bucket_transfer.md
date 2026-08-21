@@ -60,8 +60,35 @@ gcloud storage rsync \
     gs://ca-tcn-global-aggregation/gpkgs/ \
     --recursive
 ```
-### 5. The Transfer Can Be Run Repeatedly
+### 5. The Transfer Can Be Run Repeatedly (step 4)
 
 The gcloud storage rsync operation is designed to be safely rerun.
 For this workflow it is effectively idempotent/restartable:
+
+Repeats can be executed from clould shell also with something like this for each VM
+
+```
+gcloud compute ssh VM_NAME \
+    --zone=VM_ZONE \
+    --command='cd /PATH/TO/WORK && \
+      gcloud storage rsync \
+      output/gpkgs/ \
+      gs://ca-tcn-global-aggregation/gpkgs/ \
+      --recursive'
+
+```
+
+### Aggregation step when ready
+on one of the nodes we can do
+
+```
+gcloud storage rsync \
+    gs://ca-tcn-global-aggregation/gpkgs/ \
+    /mnt/data/tcn_pipeline/gpkgs/ \
+    --recursive
+```
+
+
+
+
 
