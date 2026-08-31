@@ -4,15 +4,19 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Iterator
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
@@ -82,12 +86,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Training settings.
-    parser.add_argument("--batch_size", type=int, default=1, help="Training and validation batch size.")
+    parser.add_argument("--batch_size", type=int, default=1, help="Training and validation batch size per GPU.")
     parser.add_argument("--epochs", type=int, default=100, help="Maximum number of epochs.")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="AdamW learning rate.")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="AdamW weight decay.")
     parser.add_argument("--patience", type=int, default=20, help="Early-stopping patience in epochs.")
-    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader worker processes.")
+    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader worker processes per GPU.")
 
     # Focal-loss settings.
     parser.add_argument("--focal_alpha", type=float, default=0.9, help="Focal-loss alpha.")
@@ -157,6 +161,72 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--scheduler_gamma must be greater than 0.")
     if args.max_grad_norm <= 0:
         raise ValueError("--max_grad_norm must be greater than 0.")
+
+
+def setup_distributed() -> tuple[bool, int, int, int, torch.device]:
+    """
+    Initialize Distributed Data Parallel when launched with torchrun.
+
+    Returns:
+        distributed: Whether DDP is active.
+        rank: Global process rank.
+        local_rank: GPU index on the current node.
+        world_size: Total number of DDP processes.
+        device: Device assigned to the current process.
+    """
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    distributed = world_size > 1
+
+    if distributed:
+        if not torch.cuda.is_available():
+            raise RuntimeError("DDP training requires CUDA GPUs.")
+
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend="nccl")
+
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        device = torch.device("cuda", local_rank)
+    else:
+        rank = 0
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
+
+    return distributed, rank, local_rank, world_size, device
+
+
+def cleanup_distributed() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def is_main_process(rank: int) -> bool:
+    return rank == 0
+
+
+class DistributedEvaluationSampler(Sampler[int]):
+    """
+    Split validation samples across DDP ranks without padding or duplication.
+
+    PyTorch's standard DistributedSampler pads datasets that are not evenly
+    divisible by the number of ranks. Padding is desirable for synchronized
+    training batches but would duplicate validation samples and slightly bias
+    validation metrics.
+    """
+
+    def __init__(self, dataset: Dataset, rank: int, world_size: int) -> None:
+        self.dataset = dataset
+        self.rank = rank
+        self.world_size = world_size
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(range(self.rank, len(self.dataset), self.world_size))
+
+    def __len__(self) -> int:
+        if self.rank >= len(self.dataset):
+            return 0
+        return ((len(self.dataset) - 1 - self.rank) // self.world_size) + 1
 
 
 class ImageSegmentationDataset(Dataset):
@@ -328,6 +398,18 @@ class SegmentationMetrics:
             minlength=self.num_classes ** 2,
         ).reshape(self.num_classes, self.num_classes)
 
+    def synchronize(self, device: torch.device, distributed: bool) -> None:
+        if not distributed:
+            return
+
+        confusion_matrix = torch.as_tensor(
+            self.confusion_matrix,
+            dtype=torch.long,
+            device=device,
+        )
+        dist.all_reduce(confusion_matrix, op=dist.ReduceOp.SUM)
+        self.confusion_matrix = confusion_matrix.cpu().numpy()
+
     def class_accuracy(self, class_id: int) -> float:
         denominator = self.confusion_matrix[class_id, :].sum()
         if denominator == 0:
@@ -346,13 +428,15 @@ class SegmentationMetrics:
 
 
 def run_epoch(
-    model: SegformerForSemanticSegmentation,
+    model: nn.Module,
     dataloader: DataLoader,
     loss_function: nn.Module,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
     max_grad_norm: float,
     description: str,
+    distributed: bool,
+    rank: int,
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
@@ -361,7 +445,12 @@ def run_epoch(
     total_batches = 0
     metrics = SegmentationMetrics(NUM_CLASSES)
 
-    progress_bar = tqdm(dataloader, desc=description, leave=False)
+    progress_bar = tqdm(
+        dataloader,
+        desc=description,
+        leave=False,
+        disable=not is_main_process(rank),
+    )
 
     for batch in progress_bar:
         pixel_values = batch["pixel_values"].to(device, non_blocking=True)
@@ -393,13 +482,28 @@ def run_epoch(
         true_labels = resized_labels.detach().cpu().numpy()
         metrics.update(true_labels=true_labels, predicted_labels=predictions)
 
-        progress_bar.set_postfix(loss=f"{total_loss / total_batches:.4f}")
+        if is_main_process(rank):
+            progress_bar.set_postfix(loss=f"{total_loss / total_batches:.4f}")
 
-    if total_batches == 0:
+    loss_statistics = torch.tensor(
+        [total_loss, float(total_batches)],
+        dtype=torch.float64,
+        device=device,
+    )
+
+    if distributed:
+        dist.all_reduce(loss_statistics, op=dist.ReduceOp.SUM)
+
+    global_total_loss = float(loss_statistics[0].item())
+    global_total_batches = int(loss_statistics[1].item())
+
+    if global_total_batches == 0:
         raise ValueError(f"{description} DataLoader is empty.")
 
+    metrics.synchronize(device=device, distributed=distributed)
+
     return {
-        "loss": total_loss / total_batches,
+        "loss": global_total_loss / global_total_batches,
         "background_accuracy": metrics.class_accuracy(0),
         "trough_accuracy": metrics.class_accuracy(1),
         "background_iou": metrics.class_iou(0),
@@ -472,31 +576,63 @@ def save_metrics_table(metrics: dict[str, list[float]], save_directory: Path) ->
     logging.info("Saved metrics table: %s", metrics_path)
 
 
-def configure_logging(save_directory: Path) -> None:
-    log_path = save_directory / "training.log"
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s: %(message)s",
-        handlers=[
+def configure_logging(save_directory: Path, rank: int) -> None:
+    if is_main_process(rank):
+        log_path = save_directory / "training.log"
+        handlers: list[logging.Handler] = [
             logging.FileHandler(log_path),
             logging.StreamHandler(),
-        ],
+        ]
+        level = logging.INFO
+    else:
+        handlers = [logging.NullHandler()]
+        level = logging.WARNING
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        handlers=handlers,
+        force=True,
     )
 
 
-def create_save_directory(output_dir: Path, model: str, chip_size: int) -> Path:
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    save_directory = output_dir / f"segformer_{model}_{chip_size}px_{timestamp}"
-    save_directory.mkdir(parents=True, exist_ok=False)
-    return save_directory
+def create_save_directory(
+    output_dir: Path,
+    model: str,
+    chip_size: int,
+    distributed: bool,
+    rank: int,
+) -> Path:
+    if is_main_process(rank):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        save_directory = output_dir / f"segformer_{model}_{chip_size}px_{timestamp}"
+        save_directory.mkdir(parents=True, exist_ok=False)
+        save_directory_string: list[str | None] = [str(save_directory)]
+    else:
+        save_directory_string = [None]
+
+    if distributed:
+        dist.broadcast_object_list(save_directory_string, src=0)
+
+    if save_directory_string[0] is None:
+        raise RuntimeError("Failed to obtain the shared output directory.")
+
+    return Path(save_directory_string[0])
 
 
-def save_run_configuration(args: argparse.Namespace, save_directory: Path) -> None:
+def save_run_configuration(
+    args: argparse.Namespace,
+    save_directory: Path,
+    distributed: bool,
+    world_size: int,
+) -> None:
     configuration = {
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()
     }
+    configuration["ddp_enabled"] = distributed
+    configuration["world_size"] = world_size
 
     configuration_path = save_directory / "run_configuration.json"
     with configuration_path.open("w", encoding="utf-8") as file:
@@ -505,175 +641,243 @@ def save_run_configuration(args: argparse.Namespace, save_directory: Path) -> No
     logging.info("Saved run configuration: %s", configuration_path)
 
 
+def unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, DDP) else model
+
+
 def main() -> None:
     args = parse_args()
+    distributed, rank, local_rank, world_size, device = setup_distributed()
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    save_directory = create_save_directory(
-        output_dir=args.output_dir,
-        model=args.model,
-        chip_size=args.chip_size,
-    )
-    configure_logging(save_directory)
-
-    logging.info("Outputs will be saved to: %s", save_directory)
-    logging.info("Selected SegFormer backbone: %s -> %s", args.model, MODEL_NAMES[args.model])
-    logging.info("Square chip size: %d x %d pixels", args.chip_size, args.chip_size)
-    save_run_configuration(args, save_directory)
-
-    image_processor = SegformerImageProcessor(
-        do_rescale=False,
-        do_resize=False,
-    )
-
-    train_dataset = ImageSegmentationDataset(
-        img_dir=args.train_img_dir,
-        mask_dir=args.train_mask_dir,
-        image_processor=image_processor,
-        chip_size=args.chip_size,
-    )
-    val_dataset = ImageSegmentationDataset(
-        img_dir=args.val_img_dir,
-        mask_dir=args.val_mask_dir,
-        image_processor=image_processor,
-        chip_size=args.chip_size,
-    )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pin_memory = device.type == "cuda"
-
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=pin_memory,
-    )
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=pin_memory,
-    )
-
-    id2label = {0: "background", 1: "troughs"}
-    label2id = {"background": 0, "troughs": 1}
-
-    model = SegformerForSemanticSegmentation.from_pretrained(
-        MODEL_NAMES[args.model],
-        ignore_mismatched_sizes=True,
-        num_labels=NUM_CLASSES,
-        id2label=id2label,
-        label2id=label2id,
-        reshape_last_stage=True,
-    )
-    model.to(device)
-
-    logging.info("Using device: %s", device)
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
-    loss_function = FocalLoss(
-        alpha=args.focal_alpha,
-        gamma=args.focal_gamma,
-    )
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=args.scheduler_step_size,
-        gamma=args.scheduler_gamma,
-    )
-
-    metrics = create_metrics_dictionary()
-    best_val_loss = float("inf")
-    epochs_without_improvement = 0
-
-    for epoch in range(1, args.epochs + 1):
-        logging.info("Epoch %d/%d", epoch, args.epochs)
-
-        train_metrics = run_epoch(
-            model=model,
-            dataloader=train_dataloader,
-            loss_function=loss_function,
-            device=device,
-            optimizer=optimizer,
-            max_grad_norm=args.max_grad_norm,
-            description="Training",
+    try:
+        save_directory = create_save_directory(
+            output_dir=args.output_dir,
+            model=args.model,
+            chip_size=args.chip_size,
+            distributed=distributed,
+            rank=rank,
         )
-        val_metrics = run_epoch(
-            model=model,
-            dataloader=val_dataloader,
-            loss_function=loss_function,
-            device=device,
-            optimizer=None,
-            max_grad_norm=args.max_grad_norm,
-            description="Validation",
-        )
+        configure_logging(save_directory=save_directory, rank=rank)
 
-        append_epoch_metrics(
-            metrics=metrics,
-            epoch=epoch,
-            train_metrics=train_metrics,
-            val_metrics=val_metrics,
-        )
-
-        logging.info("Train loss: %.4f | Validation loss: %.4f", train_metrics["loss"], val_metrics["loss"])
-        logging.info(
-            "Train background accuracy: %.4f | Train trough accuracy: %.4f",
-            train_metrics["background_accuracy"],
-            train_metrics["trough_accuracy"],
-        )
-        logging.info(
-            "Train background IoU: %.4f | Train trough IoU: %.4f",
-            train_metrics["background_iou"],
-            train_metrics["trough_iou"],
-        )
-        logging.info(
-            "Validation background accuracy: %.4f | Validation trough accuracy: %.4f",
-            val_metrics["background_accuracy"],
-            val_metrics["trough_accuracy"],
-        )
-        logging.info(
-            "Validation background IoU: %.4f | Validation trough IoU: %.4f",
-            val_metrics["background_iou"],
-            val_metrics["trough_iou"],
-        )
-
-        save_metrics_plot(
-            metrics=metrics,
-            save_directory=save_directory,
-            filename=f"training_metrics_epoch_{epoch}.png",
-        )
-
-        scheduler.step()
-
-        if val_metrics["loss"] < best_val_loss:
-            best_val_loss = val_metrics["loss"]
-            epochs_without_improvement = 0
-
-            model_path = save_directory / f"segformer_{args.model}_best_epoch_{epoch}.pth"
-            torch.save(model.state_dict(), model_path)
-            logging.info("Saved new best model: %s", model_path)
-        else:
-            epochs_without_improvement += 1
-            logging.info(
-                "No validation-loss improvement for %d epoch(s).",
-                epochs_without_improvement,
+        if is_main_process(rank):
+            logging.info("Outputs will be saved to: %s", save_directory)
+            logging.info("Selected SegFormer backbone: %s -> %s", args.model, MODEL_NAMES[args.model])
+            logging.info("Square chip size: %d x %d pixels", args.chip_size, args.chip_size)
+            logging.info("DDP enabled: %s | World size: %d", distributed, world_size)
+            save_run_configuration(
+                args=args,
+                save_directory=save_directory,
+                distributed=distributed,
+                world_size=world_size,
             )
 
-            if epochs_without_improvement >= args.patience:
-                logging.info("Early stopping triggered.")
+        image_processor = SegformerImageProcessor(
+            do_rescale=False,
+            do_resize=False,
+        )
+
+        train_dataset = ImageSegmentationDataset(
+            img_dir=args.train_img_dir,
+            mask_dir=args.train_mask_dir,
+            image_processor=image_processor,
+            chip_size=args.chip_size,
+        )
+        val_dataset = ImageSegmentationDataset(
+            img_dir=args.val_img_dir,
+            mask_dir=args.val_mask_dir,
+            image_processor=image_processor,
+            chip_size=args.chip_size,
+        )
+
+        train_sampler = (
+            DistributedSampler(
+                train_dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=True,
+            )
+            if distributed
+            else None
+        )
+        val_sampler = (
+            DistributedEvaluationSampler(
+                val_dataset,
+                rank=rank,
+                world_size=world_size,
+            )
+            if distributed
+            else None
+        )
+
+        pin_memory = device.type == "cuda"
+
+        train_dataloader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=train_sampler is None,
+            sampler=train_sampler,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
+        )
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            sampler=val_sampler,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
+        )
+
+        id2label = {0: "background", 1: "troughs"}
+        label2id = {"background": 0, "troughs": 1}
+
+        model = SegformerForSemanticSegmentation.from_pretrained(
+            MODEL_NAMES[args.model],
+            ignore_mismatched_sizes=True,
+            num_labels=NUM_CLASSES,
+            id2label=id2label,
+            label2id=label2id,
+            reshape_last_stage=True,
+        )
+        model.to(device)
+
+        if distributed:
+            model = DDP(
+                model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+            )
+
+        if is_main_process(rank):
+            logging.info("Using device: %s", device)
+
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+        loss_function = FocalLoss(
+            alpha=args.focal_alpha,
+            gamma=args.focal_gamma,
+        )
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=args.scheduler_step_size,
+            gamma=args.scheduler_gamma,
+        )
+
+        metrics = create_metrics_dictionary()
+        best_val_loss = float("inf")
+        epochs_without_improvement = 0
+
+        for epoch in range(1, args.epochs + 1):
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+
+            if is_main_process(rank):
+                logging.info("Epoch %d/%d", epoch, args.epochs)
+
+            train_metrics = run_epoch(
+                model=model,
+                dataloader=train_dataloader,
+                loss_function=loss_function,
+                device=device,
+                optimizer=optimizer,
+                max_grad_norm=args.max_grad_norm,
+                description="Training",
+                distributed=distributed,
+                rank=rank,
+            )
+            val_metrics = run_epoch(
+                model=model,
+                dataloader=val_dataloader,
+                loss_function=loss_function,
+                device=device,
+                optimizer=None,
+                max_grad_norm=args.max_grad_norm,
+                description="Validation",
+                distributed=distributed,
+                rank=rank,
+            )
+
+            append_epoch_metrics(
+                metrics=metrics,
+                epoch=epoch,
+                train_metrics=train_metrics,
+                val_metrics=val_metrics,
+            )
+
+            if is_main_process(rank):
+                logging.info("Train loss: %.4f | Validation loss: %.4f", train_metrics["loss"], val_metrics["loss"])
+                logging.info(
+                    "Train background accuracy: %.4f | Train trough accuracy: %.4f",
+                    train_metrics["background_accuracy"],
+                    train_metrics["trough_accuracy"],
+                )
+                logging.info(
+                    "Train background IoU: %.4f | Train trough IoU: %.4f",
+                    train_metrics["background_iou"],
+                    train_metrics["trough_iou"],
+                )
+                logging.info(
+                    "Validation background accuracy: %.4f | Validation trough accuracy: %.4f",
+                    val_metrics["background_accuracy"],
+                    val_metrics["trough_accuracy"],
+                )
+                logging.info(
+                    "Validation background IoU: %.4f | Validation trough IoU: %.4f",
+                    val_metrics["background_iou"],
+                    val_metrics["trough_iou"],
+                )
+
+                save_metrics_plot(
+                    metrics=metrics,
+                    save_directory=save_directory,
+                    filename=f"training_metrics_epoch_{epoch}.png",
+                )
+
+            scheduler.step()
+
+            if val_metrics["loss"] < best_val_loss:
+                best_val_loss = val_metrics["loss"]
+                epochs_without_improvement = 0
+
+                if is_main_process(rank):
+                    model_path = save_directory / f"segformer_{args.model}_best_epoch_{epoch}.pth"
+                    torch.save(unwrap_model(model).state_dict(), model_path)
+                    logging.info("Saved new best model: %s", model_path)
+            else:
+                epochs_without_improvement += 1
+
+                if is_main_process(rank):
+                    logging.info(
+                        "No validation-loss improvement for %d epoch(s).",
+                        epochs_without_improvement,
+                    )
+
+            should_stop = epochs_without_improvement >= args.patience
+
+            if distributed:
+                dist.barrier()
+
+            if should_stop:
+                if is_main_process(rank):
+                    logging.info("Early stopping triggered.")
                 break
 
-    save_metrics_plot(
-        metrics=metrics,
-        save_directory=save_directory,
-        filename="training_metrics_final.png",
-    )
-    save_metrics_table(metrics=metrics, save_directory=save_directory)
+        if is_main_process(rank):
+            save_metrics_plot(
+                metrics=metrics,
+                save_directory=save_directory,
+                filename="training_metrics_final.png",
+            )
+            save_metrics_table(metrics=metrics, save_directory=save_directory)
+
+        if distributed:
+            dist.barrier()
+
+    finally:
+        cleanup_distributed()
 
 
 if __name__ == "__main__":
@@ -682,21 +886,3 @@ if __name__ == "__main__":
     except Exception:
         logging.exception("Training failed.")
         raise
-
-
-"""
-USAGE
-python segformer_train.py \
-  --model_size mit-b3 \
-  --chip_size 1024 \
-  --train_path /scratch2/projects/PDG_shared/TCN_Training/tcn_mxr/train_1024/images \
-  --train_mask_path /scratch2/projects/PDG_shared/TCN_Training/tcn_mxr/train_1024/masks \
-  --val_path /scratch2/projects/PDG_shared/TCN_Training/tcn_mxr/val_1024/images \
-  --val_mask_path /scratch2/projects/PDG_shared/TCN_Training/tcn_mxr/val_1024/masks \
-  --batch_size 1 \
-  --epochs 20 \
-  --lr 1e-4 \
-  --dist_url tcp://127.0.0.1:29500 \
-  --world_size 4 \
-  --base_output_dir ./outputs/segformer_tcn_mitb3_1024
-"""

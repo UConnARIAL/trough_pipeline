@@ -153,7 +153,7 @@ imageio.mimsave(
     gif_path,
     frames,
     duration=1000.0,  # seconds per frame
-    loop=2,
+    loop=0,
 )
 
 print(f"Saved GIF: {gif_path}")
