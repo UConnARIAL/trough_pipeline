@@ -282,7 +282,7 @@ def add_date_exposure_gaussian(
     comps_layer: Optional[str] = None,
     edges_length_field: str = "length_m",
     comps_length_field: str = "total_length_m",
-    target_crs: str = "EPSG:3338",
+    target_crs: str = "EPSG:3413",
     circular: bool = False,
 ) -> None:
     """
@@ -579,7 +579,7 @@ def main():
         comps_layer="GraphTheoreticComponents",
         edges_length_field="length_m",
         comps_length_field="total_length_m",
-        target_crs="EPSG:3338",
+        target_crs="EPSG:3413",
     )
 
 if __name__ == "__main__":

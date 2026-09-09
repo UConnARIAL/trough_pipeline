@@ -5,7 +5,7 @@ version = "2026.01"
 id_version = "v1.0-deterministic-rcsorted-neighsorted-compsorted"
 
 [crs]
-target_epsg = 3413
+target_epsg = 3338
 default_pixel_m = 0.5
 
 [runtime]
@@ -20,17 +20,17 @@ omp_threads = 1
 # These are common across steps
 # make them all absolute paths relative used for testing/git upload.....
 input_img_dir = "/scratch2/projects/PDG_shared/CanadaTundraMosaic/" # dir that contains orignal img sub dirs(tiles)
-model_mask_dir = "/scratch2/projects/PDG_shared/CanadaTundraMosaicMasks_missing_only/" # dir that contains ML model outputs (raw detections bef any filtering)
-master_dir = "/scratch2/projects/PDG_shared/CanadaTundraMosaicMasks_missing_only_clean/"     # cleaned inputs that step 1 reads
-output_root = "/scratch2/projects/PDG_shared/CA_TCN/gpkgs/"    # GPKG outputs rooted read/write
-mosaic_gpkg = "/scratch2/projects/PDG_shared/CA_TCN/gpkgs/global_summary.gpkg" #name/path of the final global summary gpkg
-ocean_mask_shp = "./data/ocean_3413_ca_clip.gpkg"     # Ocean mask to be used to filter masks
+model_mask_dir = "../TCN_refac_test_imgs_model/" # dir that contains ML model outputs (raw detections bef any filtering)
+master_dir = "./TCN_refac_test_imgs/"            # cleaned inputs that step 1 reads
+output_root = "../TCN_refac_test_gpkgs"          # GPKG outputs rooted read/write
+mosaic_gpkg = "../TCN_refac_test_gpkgs/global_summary.gpkg" #name/path of the final global summary gpkg
+ocean_mask_shp = "../water_3413_clip2.gpkg"     # Ocean mask to be used to filter masks
 ocean_mask_layer = "water_clip"
 
 # Convenience subfolders (steps can override if needed)
-output_tiles_dir = "/scratch2/projects/PDG_shared/CA_TCN/gpkgs/"   # step1 writes per-file gpkg under tile_id/
-tile_out_dir    = "/scratch2/projects/PDG_shared/CA_TCN/gpkgs/tiles"      # step2 could write per-tile gpkg
-global_out_dir  = "/scratch2/projects/PDG_shared/CA_TCN/gpkgs/global"  # step3 could write global gpkg / reports
+output_tiles_dir = "../TCN_refac_test_gpkgs"   # step1 writes per-file gpkg under tile_id/
+tile_out_dir    = "./outputs/tiles"      # step2 could write per-tile gpkg
+global_out_dir  = "./outputs/global"     # step3 could write global gpkg / reports
 
 [layers]
 nodes      = "GraphTheoreticNodes"
@@ -40,7 +40,7 @@ cutlines   = "InputMosaicCutlinesVector"
 
 [cutlines]
 enabled = true
-root = "/scratch2/projects/PDG_shared/CanadaTundraMosaic/"
+root = "/scratch2/projects/PDG_shared/AlaskaTundraMosaic/imagery"
 filename_pattern = "ArcticMosaic_{tile_id}_cutlines.shp"
 
 [masks]
@@ -49,7 +49,7 @@ old_gpkg_root = "/scratch2/projects/PDG_shared/AK_TCN_Masks_only/" #not required
 postfix = "_mask.tif"
 
 [vectorize]
-target_srs = "EPSG:3413"
+target_srs = "EPSG:3338"
 assume_src_srs = "EPSG:3413"
 build_overviews = [2, 4, 8, 16]
 eight_connected = true
@@ -65,12 +65,12 @@ mean_day = 15
 sigma_days = 45
 edges_length_field = "length_m"
 comps_length_field = "total_length_m"
-target_crs = "EPSG:3413"
+target_crs = "EPSG:3338"
 
 # ===================== Step 1: Subtile processing =====================
 [steps.mask_filter]
 enabled = true
-water_shp = "./data/ocean_3413_ca_clip.gpkg"          # OR water_geojson
+water_shp = "/path/water.gpkg"          # OR water_geojson
 ocean_threshold = 0.99
 buffer_m = 500.0
 simplify_m = 0.0

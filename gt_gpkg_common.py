@@ -118,8 +118,13 @@ def finalize_workers(n_workers: int, *, cfg: dict) -> int:
 def get_id_version(cfg: dict) -> str:
     return str(cfg_get(cfg, "project", "id_version", default="v1.0"))
 
+#def get_target_epsg(cfg: dict) -> int:
+ #   return int(cfg_get(cfg, "crs", "target_epsg", default=3338))
 def get_target_epsg(cfg: dict) -> int:
-    return int(cfg_get(cfg, "crs", "target_epsg", default=3338))
+    value = cfg_get(cfg, "crs", "target_epsg", default=None)
+    if value is None:
+        raise ValueError("Missing required config setting: [crs] target_epsg")
+    return int(value)
 
 class StageTimer:
     """Tiny context manager for stage timing that logs on exit if enabled."""

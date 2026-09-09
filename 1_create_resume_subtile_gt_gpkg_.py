@@ -259,7 +259,7 @@ def write_per_file_gpkg(
         output_gpkg=out_gpkg,
         orig_mask_tif=orig_mask_path,
         cleaned_mask_tif=tif_path,
-        target_srs=vec_cfg.get("target_srs", "EPSG:3338"),
+        target_srs=vec_cfg.get("target_srs", "EPSG:3413"),
         assume_src_srs=vec_cfg.get("assume_src_srs", "EPSG:3413"),
         build_overviews=tuple(vec_cfg.get("build_overviews", [2, 4, 8, 16])),
         eight_connected=bool(vec_cfg.get("eight_connected", True)),
@@ -282,7 +282,7 @@ def write_per_file_gpkg(
             comps_layer=comps_layer,
             edges_length_field=exp_cfg.get("edges_length_field", "length_m"),
             comps_length_field=exp_cfg.get("comps_length_field", "total_length_m"),
-            target_crs=exp_cfg.get("target_crs", "EPSG:3338"),
+            target_crs=exp_cfg.get("target_crs", "EPSG:3413"),
         )
     if verbose:
         logging.debug(f"[{tile_id or ''}] finished per-file packaging: {out_gpkg}")
@@ -292,7 +292,10 @@ def write_per_file_gpkg(
 def process_one_subtile(task):
     cfg, tile_id, tif_path, output_tiles_dir, verbose = task
 
-    target_epsg = int(cfg_get(cfg, "crs", "target_epsg", default=3338))
+    target_epsg_raw = int(cfg_get(cfg, "crs", "target_epsg", default=None))
+    if target_epsg_raw is None:
+        raise ValueError("Missing required config setting: [crs] target_epsg")
+    target_epsg = int(target_epsg_raw)
     TARGET_CRS = CRS.from_epsg(target_epsg)
     DEFAULT_PIXEL_M = float(cfg_get(cfg, "crs", "default_pixel_m", default=0.5))
     COMPS_HEARTBEAT = int(cfg_get(cfg, "runtime", "comps_heartbeat", default=20000))
@@ -596,7 +599,9 @@ def process_one_subtile(task):
         logging.error(f"{pfx} per-file GPKG write error: {e}")
         return False
 
-    problems = check_gpkg_crs_all_layers(out_gpkg, "EPSG:3338")
+    #problems = check_gpkg_crs_all_layers(out_gpkg, "EPSG:3338")
+    expected_srs = f"EPSG:{target_epsg}"
+    problems = check_gpkg_crs_all_layers(out_gpkg, expected_srs)
     if problems:
         for p in problems:
             logging.error(p)
@@ -770,5 +775,12 @@ if __name__ == "__main__":
 USAGE Minimal 
 python 1_create_resume_subtile_gt_gpkg_.py --config ./config/subtile_gpkg.toml --verbose
 python 1_create_resume_subtile_gt_gpkg_.py --config ./config.toml --tifs-per-run 5 --verbose
+python 1_create_resume_subtile_gt_gpkg_.py   --config config.toml   --one-tile "33_27"  --tifs-per-run 2  --workers 1  --verbose
+
+python 1_create_resume_subtile_gt_gpkg_.py \
+  --config config.toml \
+  --one-tile "34_24" \
+  --workers 4 \
+  --verbose
 
 """

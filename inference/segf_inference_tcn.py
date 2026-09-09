@@ -49,8 +49,8 @@ from contextlib import contextmanager
 ENCODER = "mit-b3"
 CHIP_SIZE = 1024
 OVERLAP = 128
-THRESHOLD = 0.005 # 0.01
-TARGET_RES = 0.75   # 0.5-meter resolution
+THRESHOLD = 0.01 # 0.01
+TARGET_RES = 0.5 # 0.5-meter resolution
 NULL_VALUE = 0
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
