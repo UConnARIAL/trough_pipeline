@@ -1,11 +1,82 @@
 #!/usr/bin/env python3
 """
-Report remaining GPKG work per tile:
-  rank, tile_id, total_tiff, gpkg, balance[, seconds], pending_subtiles
+Report GPKG completion status per parent tile.
+
+For each tile, reports:
+    rank
+    tile_id
+    total_tiff
+    gpkg
+    zero_mask
+    balance
+    [seconds]
+    pending_subtiles
+
+Definitions
+-----------
+total_tiff
+    Number of input mask TIFFs for the parent tile.
+
+gpkg
+    Number of input masks already represented by a completed GPKG,
+    as determined by filter_done_tiffs().
+
+zero_mask
+    Number of input masks without a GPKG that were confirmed to contain
+    no non-zero pixels. These masks legitimately produce no graph/GPKG.
+
+    This check is only performed when --check_zero_masks is supplied.
+    Masks are read block-by-block to avoid loading very large rasters
+    completely into memory.
+
+balance
+    Remaining masks requiring attention.
+
+    Without --check_zero_masks:
+        balance = total_tiff - gpkg
+
+    With --check_zero_masks:
+        balance = total_tiff - gpkg - zero_mask
+
+    If a mask cannot be read during the zero-mask check, it remains in
+    balance rather than being classified as zero.
+
+pending_subtiles
+    Comma-separated IDs for masks still requiring a GPKG after any
+    zero-mask filtering.
+
+Options
+-------
+--check_zero_masks
+    Examine masks lacking GPKGs and exclude confirmed all-zero masks
+    from the remaining balance.
+
+--profile
+    Add the wall-clock processing time for each parent tile to the
+    report. This does not otherwise change the status calculation.
+
+--verify
+    Enable the more expensive verification mode in filter_done_tiffs().
+
+--csv
+    Optionally write the report to CSV.
+    NOT updated for teh zero mask filter!
+
+Completion
+----------
+When --check_zero_masks is enabled, effective completion is:
+
+    (gpkg + zero_mask) / total_tiff
+
+Otherwise completion represents GPKG coverage only:
+
+    gpkg / total_tiff
 
 Requires:
-    from gt_gpkg_tile_resume_check_sub3 import filter_done_tiffs
-which returns (remaining_tifs_list, skipped_count)
+    from gt_gpkg_common import filter_done_tiffs
+
+filter_done_tiffs() returns:
+    (remaining_tifs_list, skipped_count)
 """
 
 import os
@@ -16,6 +87,33 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from gt_gpkg_common import filter_done_tiffs
+
+
+def mask_has_foreground(path: str) -> bool:
+    """
+    Return True if the raster contains at least one non-zero,
+    non-nodata pixel.
+
+    Reads block-by-block so a 26667 x 26667 mask is never loaded
+    completely into memory.
+    """
+    import numpy as np
+    import rasterio
+
+    with rasterio.open(path) as src:
+        nodata = src.nodata
+
+        for _, window in src.block_windows(1):
+            arr = src.read(1, window=window)
+
+            if nodata is None:
+                if np.any(arr != 0):
+                    return True
+            else:
+                if np.any((arr != 0) & (arr != nodata)):
+                    return True
+
+    return False
 
 def discover_tiles(master_dir: str):
     return [e.name for e in os.scandir(master_dir) if e.is_dir()]
@@ -71,7 +169,97 @@ def extract_subtile_id(path: str) -> str:
         return m.group(1)
     return os.path.splitext(name)[0]
 
-def process_one_tile(tile_id, master_dir, output_tiles_dir, ext, verify, verbose, profile):
+def process_one_tile(
+    tile_id,
+    master_dir,
+    output_tiles_dir,
+    ext,
+    verify,
+    verbose,
+    profile,
+    check_zero_masks,
+):
+    import time
+    import os
+    import logging
+
+    start = time.time()
+
+    tile_img_dir = os.path.join(master_dir, tile_id)
+    tile_out_dir = os.path.join(output_tiles_dir, tile_id)
+    outdir_exists = os.path.isdir(tile_out_dir)
+
+    tifs = fast_list(tile_img_dir, ext)
+    total = len(tifs)
+
+    zero_count = 0
+
+    if total == 0:
+        remaining = []
+        done = 0
+
+    elif not outdir_exists:
+        # Nothing has been created yet.
+        remaining = tifs
+        done = 0
+
+    else:
+        remaining, done_raw = filter_done_tiffs(
+            tifs,
+            tile_out_dir,
+            verify=verify,
+            verbose=verbose,
+        )
+
+        done = _countish(done_raw)
+
+    # ---------------------------------------------------------
+    # Optional classification of missing outputs:
+    #
+    # If a source mask is completely zero, no graph/GPKG is
+    # expected. Remove it from the true pending balance.
+    # ---------------------------------------------------------
+    if check_zero_masks and remaining:
+        nonzero_remaining = []
+
+        for tif in remaining:
+            try:
+                if mask_has_foreground(tif):
+                    nonzero_remaining.append(tif)
+                else:
+                    zero_count += 1
+
+            except Exception as e:
+                # If we cannot determine whether it is zero,
+                # keep it pending rather than incorrectly
+                # declaring it complete.
+                logging.warning(
+                    f"[{tile_id}] zero-mask check failed for "
+                    f"{os.path.basename(tif)}: {e}"
+                )
+                nonzero_remaining.append(tif)
+
+        remaining = nonzero_remaining
+
+    bal = len(remaining)
+
+    pending_ids = [extract_subtile_id(f) for f in remaining]
+    pending_ids.sort(key=_natural_key)
+    pending_str = ",".join(pending_ids)
+
+    secs = time.time() - start
+
+    return (
+        tile_id,
+        total,
+        done,
+        zero_count,
+        bal,
+        secs if profile else None,
+        pending_str,
+    )
+
+def process_one_tile_old(tile_id, master_dir, output_tiles_dir, ext, verify, verbose, profile):
     import time, os
     start = time.time()
 
@@ -151,7 +339,13 @@ def main():
                     help="Number of parallel worker threads (default: ~2x CPU)")
     ap.add_argument("--verify", action="store_true", help="Enable expensive verification in filter_done_tiffs")
     ap.add_argument("--profile", action="store_true", help="Include per-tile seconds in output")
-
+    ap.add_argument(
+        "--check_zero_masks",
+        action="store_true",
+        help=(
+            "For TIFFs without a completed GPKG, check whether the mask is entirely zero. Zero masks are excluded from balance."
+        ),
+    )
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -161,7 +355,8 @@ def main():
         return
 
     rows = []
-    total_tiff = total_done = total_bal = 0
+    #total_tiff = total_done = total_bal = 0
+    total_tiff = total_done = total_zero = total_bal = 0
 
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
         futs = {
@@ -174,45 +369,175 @@ def main():
                 args.verify,
                 args.verbose_filter,
                 args.profile,
+                args.check_zero_masks,
             ): tile_id
             for tile_id in tiles
         }
         for fut in as_completed(futs):
             tile = futs[fut]
             try:
-                tile_id, total, done, bal, secs, pending_str = fut.result()
-                rows.append((tile_id, total, done, bal, secs, pending_str))
+                #tile_id, total, done, bal, secs, pending_str = fut.result()
+                #rows.append((tile_id, total, done, bal, secs, pending_str))
+                tile_id, total, done, zero_count, bal, secs, pending_str = fut.result()
+                rows.append(
+                    (tile_id, total, done, zero_count, bal, secs, pending_str)
+                )
                 total_tiff += total
                 total_done += done
+                total_zero += zero_count
                 total_bal += bal
             except Exception as e:
                 logging.error(f"[{tile}] ERROR: {e}")
-                rows.append((tile, 0, 0, 0, None, ""))
+                rows.append((tile, 0, 0, 0, 0, None, ""))
+                #rows.append((tile, 0, 0, 0, None, ""))
 
     rows.sort(key=lambda r: _natural_key(r[0]))
 
     # Pretty print table with rank
     if args.profile:
-        header = ("rank", "tile_id", "total_tiff", "gpkg", "balance", "seconds", "pending_subtiles")
-        colw = (6, 28, 12, 8, 8, 10, 60)  # widen last as needed
-        fmt = f"{{:>{colw[0]}}} {{:<{colw[1]}}} {{:>{colw[2]}}} {{:>{colw[3]}}} {{:>{colw[4]}}} {{:>{colw[5]}.2f}} {{:<{colw[6]}}}"
+        #header = ("rank", "tile_id", "total_tiff", "gpkg", "balance", "seconds", "pending_subtiles")
+        #colw = (6, 28, 12, 8, 8, 10, 60)  # widen last as needed
+        #fmt = f"{{:>{colw[0]}}} {{:<{colw[1]}}} {{:>{colw[2]}}} {{:>{colw[3]}}} {{:>{colw[4]}}} {{:>{colw[5]}.2f}} {{:<{colw[6]}}}"
+        header = (
+            "rank",
+            "tile_id",
+            "total_tiff",
+            "gpkg",
+            "zero_mask",
+            "balance",
+            "seconds",
+            "pending_subtiles",
+        )
+
+        colw = (6, 28, 12, 8, 10, 8, 10, 60)
+
+        fmt = (
+            f"{{:>{colw[0]}}} "
+            f"{{:<{colw[1]}}} "
+            f"{{:>{colw[2]}}} "
+            f"{{:>{colw[3]}}} "
+            f"{{:>{colw[4]}}} "
+            f"{{:>{colw[5]}}} "
+            f"{{:>{colw[6]}.2f}} "
+            f"{{:<{colw[7]}}}"
+        )
     else:
-        header = ("rank", "tile_id", "total_tiff", "gpkg", "balance", "pending_subtiles")
-        colw = (6, 28, 12, 8, 8, 60)
-        fmt = f"{{:>{colw[0]}}} {{:<{colw[1]}}} {{:>{colw[2]}}} {{:>{colw[3]}}} {{:>{colw[4]}}} {{:<{colw[5]}}}"
+        #header = ("rank", "tile_id", "total_tiff", "gpkg", "balance", "pending_subtiles")
+        #colw = (6, 28, 12, 8, 8, 60)
+        #fmt = f"{{:>{colw[0]}}} {{:<{colw[1]}}} {{:>{colw[2]}}} {{:>{colw[3]}}} {{:>{colw[4]}}} {{:<{colw[5]}}}"
+        header = (
+            "rank",
+            "tile_id",
+            "total_tiff",
+            "gpkg",
+            "zero_mask",
+            "balance",
+            "pending_subtiles",
+        )
+        colw = (6, 28, 12, 8, 10, 8, 60)
+
+        fmt = (
+            f"{{:>{colw[0]}}} "
+            f"{{:<{colw[1]}}} "
+            f"{{:>{colw[2]}}} "
+            f"{{:>{colw[3]}}} "
+            f"{{:>{colw[4]}}} "
+            f"{{:>{colw[5]}}} "
+            f"{{:<{colw[6]}}}"
+        )
 
     print(fmt.format(*header))
     print("-" * sum(colw))
     if args.profile:
-        for i, (tile_id, total, done, bal, secs, pending) in enumerate(rows, 1):
-            print(fmt.format(i, tile_id, total, done, bal, secs if secs is not None else 0.0, pending))
+        for i, (tile_id, total, done, zero_count, bal, secs, pending) in enumerate(rows, 1):
+            print(
+                fmt.format(
+                    i,
+                    tile_id,
+                    total,
+                    done,
+                    zero_count,
+                    bal,
+                    secs if secs is not None else 0.0,
+                    pending,
+                )
+            )
+
         print("-" * sum(colw))
-        print(fmt.format("", "SUM", total_tiff, total_done, total_bal, 0.0, ""))
+
+        print(
+            fmt.format(
+                "",
+                "SUM",
+                total_tiff,
+                total_done,
+                total_zero,
+                total_bal,
+                0.0,
+                "",
+            )
+        )
+        #for i, (tile_id, total, done, bal, secs, pending) in enumerate(rows, 1):
+        #    print(fmt.format(i, tile_id, total, done, bal, secs if secs is not None else 0.0, pending))
+        #print("-" * sum(colw))
+        #print(fmt.format("", "SUM", total_tiff, total_done, total_bal, 0.0, ""))
     else:
-        for i, (tile_id, total, done, bal, _, pending) in enumerate(rows, 1):
-            print(fmt.format(i, tile_id, total, done, bal, pending))
+        for i, (tile_id, total, done, zero_count, bal, _, pending) in enumerate(rows, 1):
+            print(
+                fmt.format(
+                    i,
+                    tile_id,
+                    total,
+                    done,
+                    zero_count,
+                    bal,
+                    pending,
+                )
+            )
+
         print("-" * sum(colw))
-        print(fmt.format("", "SUM", total_tiff, total_done, total_bal, ""))
+
+        print(
+            fmt.format(
+                "",
+                "SUM",
+                total_tiff,
+                total_done,
+                total_zero,
+                total_bal,
+                "",
+            )
+        )
+        #for i, (tile_id, total, done, bal, _, pending) in enumerate(rows, 1):
+        #    print(fmt.format(i, tile_id, total, done, bal, pending))
+        #print("-" * sum(colw))
+        #print(fmt.format("", "SUM", total_tiff, total_done, total_bal, ""))
+
+    # Overall completion summary
+    if total_tiff > 0:
+        if args.check_zero_masks:
+            accounted = total_done + total_zero
+            pct_done = 100.0 * accounted / total_tiff
+            pct_remaining = 100.0 * total_bal / total_tiff
+
+            print(
+                f"\nEffective completion: {pct_done:.2f}% "
+                f"({accounted}/{total_tiff} accounted for: "
+                f"{total_done} GPKG + {total_zero} zero-mask; "
+                f"{total_bal} remaining, {pct_remaining:.2f}%)"
+            )
+
+        else:
+            pct_done = 100.0 * total_done / total_tiff
+            pct_remaining = 100.0 * total_bal / total_tiff
+
+            print(
+                f"\nGPKG completion: {pct_done:.2f}% "
+                f"({total_done}/{total_tiff}; "
+                f"{total_bal} remaining, {pct_remaining:.2f}%)"
+            )
+
+
 
     # Optional CSV (now with 'pending_subtiles')
     if args.csv:
@@ -231,3 +556,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+"""
+python -m utils.get_gpkg_get_status  --master_dir /scratch2/projects/PDG_shared/CanadaTundraMosaicMasks_clean2/ --output_tiles_dir /scratch2/projects/PDG_shared/CA_TCN/gpkgs2/
+"""
